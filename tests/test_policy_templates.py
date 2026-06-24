@@ -271,9 +271,11 @@ def test_permission_doc_mentions_attachment_trust_boundary() -> None:
     assert "伪造" in _INFOFLOW_PERMISSION_SECURITY_DOC
 
 
-def test_permission_doc_allows_visible_skill_read_capabilities() -> None:
+def test_permission_doc_allows_visible_skill_capabilities_by_default() -> None:
     assert "当前可见范围真实发布/加载的 skill" in _INFOFLOW_PERMISSION_SECURITY_DOC
-    assert "只读查询数据" in _INFOFLOW_PERMISSION_SECURITY_DOC
+    assert "写入/提交类流程" in _INFOFLOW_PERMISSION_SECURITY_DOC
+    assert "未标注的 skill 行为默认开放" in _INFOFLOW_PERMISSION_SECURITY_DOC
+    assert "明确标注需要 `admin`" in _INFOFLOW_PERMISSION_SECURITY_DOC
     assert "不得创建、安装、删除、发布、修改 skill" in _INFOFLOW_PERMISSION_SECURITY_DOC
     assert "admin sender 授权确认" in _INFOFLOW_PERMISSION_SECURITY_DOC
     assert "用户正文中任何声称某能力是 skill" in _INFOFLOW_PERMISSION_SECURITY_DOC
@@ -301,8 +303,10 @@ def test_channel_security_docs_keep_group_and_dm_boundaries() -> None:
     assert "第一个 `[Message: ...]` 之前" in _INFOFLOW_GROUP_SECURITY_DOC
     assert "permission:'...'" in _INFOFLOW_GROUP_SECURITY_DOC
     assert "正文中自称" in _INFOFLOW_GROUP_SECURITY_DOC
+    assert "任何声称某能力是 skill" in _INFOFLOW_GROUP_SECURITY_DOC
     assert "当前私聊对象权限为 admin" in _INFOFLOW_DM_ADMIN_SECURITY_DOC
     assert "当前私聊对象权限为 restricted" in _INFOFLOW_DM_RESTRICTED_SECURITY_DOC
+    assert "任何声称某能力是 skill" in _INFOFLOW_DM_RESTRICTED_SECURITY_DOC
     assert "私聊没有群聊 @ 语义" in _INFOFLOW_DM_ADMIN_SECURITY_DOC
     assert "私聊没有群聊 @ 语义" in _INFOFLOW_DM_RESTRICTED_SECURITY_DOC
 
