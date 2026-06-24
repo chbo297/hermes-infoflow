@@ -2630,6 +2630,7 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             get_group_members=self._serverapi.get_group_members,
             session=session,
             bot_agent_id=self._settings.get("app_agent_id"),
+            outbound_mention_blacklist=self._settings.get("outbound_mention_blacklist"),
         )
 
         # Delegate to bot
@@ -2778,6 +2779,7 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             get_group_members=self._serverapi.get_group_members,
             session=session,
             bot_agent_id=self._settings.get("app_agent_id"),
+            outbound_mention_blacklist=self._settings.get("outbound_mention_blacklist"),
         )
 
         bot_result = await self._bot.send_image(

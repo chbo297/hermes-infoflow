@@ -127,6 +127,10 @@ optional_env:
     description: "Legacy single regex triggering the bot when matched in message text. Add more legacy patterns with INFOFLOW_WATCH_REGEX_* env vars. Prefer named rules with INFOFLOW_REGEX_WATCH_<KEY> and optional INFOFLOW_REGEX_SKILL_<KEY> for skill hints."
     prompt: "Watch regex pattern"
     password: false
+  - name: INFOFLOW_OUTBOUND_MENTION_BLACKLIST
+    description: "Comma-separated outbound @ blacklist. Robot-sent group messages will not directly @ user:<uuapName> or bot:<agentId> entries; @all and emoji reactions are unaffected."
+    prompt: "Outbound @ blacklist (user:alice,bot:123)"
+    password: false
   - name: INFOFLOW_FOLLOW_UP
     description: "Enable follow-up replies after bot responds (default true). When true, the bot continues to engage messages in the same group within the follow-up window."
     prompt: "Follow-up enabled? (true/false)"

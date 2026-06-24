@@ -577,6 +577,51 @@ def test_read_settings_parses_comma_watch_mentions_from_env(monkeypatch) -> None
     assert s["watch_mentions"] == ["chengbo05", "alice", "12345"]
 
 
+def test_read_settings_parses_outbound_mention_blacklist_from_env(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "INFOFLOW_OUTBOUND_MENTION_BLACKLIST",
+        "user:liuyaqin, bot:17212, user:liuyaqin",
+    )
+
+    s = _read_account_settings(_cfg())
+
+    assert s["outbound_mention_blacklist"] == {
+        "user_ids": ["liuyaqin"],
+        "agent_ids": [17212],
+    }
+
+
+def test_read_settings_parses_outbound_mention_blacklist_from_config(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("INFOFLOW_OUTBOUND_MENTION_BLACKLIST", raising=False)
+
+    s = _read_account_settings(
+        _cfg({"outboundMentionBlacklist": ["user:alice", "bot:7000"]})
+    )
+
+    assert s["outbound_mention_blacklist"] == {
+        "user_ids": ["alice"],
+        "agent_ids": [7000],
+    }
+
+
+def test_read_settings_ignores_invalid_outbound_mention_blacklist(
+    monkeypatch,
+    caplog,
+) -> None:
+    monkeypatch.setenv(
+        "INFOFLOW_OUTBOUND_MENTION_BLACKLIST",
+        "liuyaqin,bot:not-number",
+    )
+
+    s = _read_account_settings(_cfg())
+
+    assert s["outbound_mention_blacklist"] == {"user_ids": [], "agent_ids": []}
+    assert "Ignoring invalid INFOFLOW_OUTBOUND_MENTION_BLACKLIST entry" in caplog.text
+    assert "Ignoring invalid INFOFLOW_OUTBOUND_MENTION_BLACKLIST bot entry" in caplog.text
+
+
 def test_read_settings_parses_watch_regex_from_config_list(monkeypatch) -> None:
     _clear_watch_regex_env(monkeypatch)
     s = _read_account_settings(_cfg({"watch_regex": ["\\bdeploy\\b", "ship\\s+it"]}))

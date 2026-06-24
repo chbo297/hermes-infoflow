@@ -1373,6 +1373,232 @@ def test_send_group_message_intent_inline_at_all_and_specific_uses_md_payload(
     ]
 
 
+def test_send_group_message_intent_filters_blacklisted_structured_mentions(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {
+            "user_ids": ["chengbo05"],
+            "agent_ids": [17212],
+        },
+    })
+
+    result = asyncio.run(api.send_group_message_intent(
+        "4507088",
+        message="hello",
+        mention_user_ids=["chengbo05", "alice"],
+        mention_agent_ids=["17212", "17213"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "outbound_mention_blacklist",
+            "message": "blacklisted @ mentions were removed",
+        },
+    )
+    assert captured[0]["msgtype"] == "MD"
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["alice"], "atagentids": [17213]},
+        {"type": "MD", "content": "@alice @17213 hello"},
+    ]
+
+
+def test_send_group_message_intent_filters_blacklisted_inline_mentions(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        assert group_id == "4507088"
+        return [
+            GroupMember(uid="liuyaqin", name="刘雅琴", is_bot=False),
+            GroupMember(uid="chengbo05", name="成博", is_bot=False),
+            GroupMember(uid="17212", name="botA", agent_id=17212, is_bot=True),
+            GroupMember(uid="17213", name="botB", agent_id=17213, is_bot=True),
+        ]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {
+            "user_ids": ["liuyaqin"],
+            "agent_ids": [17212],
+        },
+    })
+
+    result = asyncio.run(api.send_group_message_intent(
+        "4507088",
+        message="hi @liuyaqin @chengbo05 @17212 @17213 @botA @botB",
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "outbound_mention_blacklist",
+            "message": "blacklisted @ mentions were removed",
+        },
+    )
+    assert captured[0]["msgtype"] == "MD"
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["chengbo05"], "atagentids": [17213]},
+        {
+            "type": "MD",
+            "content": "hi @liuyaqin @chengbo05 @17212 @17213 @botA @botB",
+        },
+    ]
+
+
+def test_send_group_message_intent_preserves_at_all_when_blacklisted_member_present(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        assert group_id == "4507088"
+        return [GroupMember(uid="liuyaqin", name="刘雅琴", is_bot=False)]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {"user_ids": ["liuyaqin"]},
+    })
+
+    result = asyncio.run(api.send_group_message_intent(
+        "4507088",
+        message="hello @all",
+        at_all=True,
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == ()
+    assert captured[0]["msgtype"] == "MD"
+    assert captured[0]["body"] == [
+        {"type": "AT", "atall": True},
+        {"type": "MD", "content": "hello @all"},
+    ]
+
+
+def test_send_group_structured_filters_blacklisted_at_items(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {
+            "user_ids": ["chengbo05"],
+            "agent_ids": [17212],
+        },
+    })
+
+    result = asyncio.run(api.send_group_structured(
+        "4507088",
+        body=[
+            {"type": "AT", "atuserids": ["chengbo05", "alice"], "atagentids": [17212, 17213]},
+            {"type": "TEXT", "content": "hello"},
+        ],
+        msgtype="TEXT",
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "outbound_mention_blacklist",
+            "message": "blacklisted @ mentions were removed",
+        },
+    )
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["alice"], "atagentids": [17213]},
+        {"type": "TEXT", "content": "hello"},
+    ]
+
+
+def test_send_group_structured_preserves_at_all_when_blacklisted_member_present(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        assert group_id == "4507088"
+        return [GroupMember(uid="chengbo05", name="成博", is_bot=False)]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {"user_ids": ["chengbo05"]},
+    })
+
+    result = asyncio.run(api.send_group_structured(
+        "4507088",
+        body=[
+            {"type": "AT", "atall": True},
+            {"type": "TEXT", "content": "hello @all"},
+        ],
+        msgtype="TEXT",
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == ()
+    assert captured[0]["body"] == [
+        {"type": "AT", "atall": True},
+        {"type": "TEXT", "content": "hello @all"},
+    ]
+
+
 def test_send_group_message_intent_image_uses_image_payload(monkeypatch, tmp_path) -> None:
     captured: list[dict[str, object]] = []
     image = tmp_path / "blue.png"

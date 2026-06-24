@@ -108,6 +108,36 @@ async def test_self_mention_by_digit_id_is_dropped() -> None:
     assert options.mention_agent_ids == "6533"
 
 
+async def test_blacklisted_mentions_are_dropped_before_bot_name_rewrite() -> None:
+    members = [
+        GroupMember(uid="liuyaqin", name="Liu", is_bot=False),
+        GroupMember(uid="chengbo05", name="Chengbo", is_bot=False),
+        GroupMember(uid="17212", name="helperA", agent_id=17212, is_bot=True),
+        GroupMember(uid="17213", name="helperB", agent_id=17213, is_bot=True),
+    ]
+
+    async def get_group_members(group_id: str, **kwargs):
+        return members
+
+    text, options = await prepare_outbound_message(
+        "@liuyaqin @chengbo05 @helperA @helperB",
+        group_id="1",
+        metadata={
+            "mention_user_ids": "liuyaqin,alice",
+            "mention_agent_ids": "17212,17213",
+        },
+        get_group_members=get_group_members,
+        outbound_mention_blacklist={
+            "user_ids": ["liuyaqin"],
+            "agent_ids": [17212],
+        },
+    )
+
+    assert text == "@liuyaqin @chengbo05 @helperA @17213"
+    assert options.mention_user_ids == "alice,chengbo05"
+    assert options.mention_agent_ids == "17213"
+
+
 async def test_self_mention_via_metadata_is_filtered() -> None:
     """Explicit ``metadata.mention_agent_ids`` must also drop self."""
 

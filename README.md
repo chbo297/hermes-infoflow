@@ -221,6 +221,7 @@ bash scripts/deploy.sh --port 9000 # 指定 webhook 端口并写入 ~/.hermes/.e
 | `INFOFLOW_REQUIRE_MENTION` | `true` | 群消息是否仅在 @ 时响应 |
 | `INFOFLOW_WATCH_MENTIONS` | 无 | 单个用户名 / ID，或逗号分隔多个用户名 / ID；命中后即使没 @ 机器人也会触发 |
 | `INFOFLOW_WATCH_REGEX` | 无 | 单条正则匹配触发；多条正则使用 `INFOFLOW_WATCH_REGEX_*` |
+| `INFOFLOW_OUTBOUND_MENTION_BLACKLIST` | 无 | 外发直接 @ 黑名单，逗号分隔 `user:<uuapName>` / `bot:<agentId>`；只影响机器人发群消息时的具体 @，不影响 `@all`、入站触发或处理中表情 |
 | `INFOFLOW_FOLLOW_UP` | `true` | 机器人回复后群聊 follow-up 窗口是否开启 |
 | `INFOFLOW_FOLLOW_UP_WINDOW` | `300` | follow-up 窗口秒数 |
 | `INFOFLOW_GROUPS` | 无 | 按群 ID 的 JSON 配置覆盖 |
@@ -259,6 +260,14 @@ INFOFLOW_WATCH_REGEX=^(?=.*iphone)(?=.*crash)(?=.*异常).*$
 INFOFLOW_WATCH_REGEX_icode=^https://console\.cloud\.baidu-int\.com/devops/icode/repos/baidu(?:/[^/]+)*/reviews(?:/[^/]+)*$
 INFOFLOW_WATCH_REGEX_ios=iphone|ios|crash
 ```
+
+`INFOFLOW_OUTBOUND_MENTION_BLACKLIST` 只限制机器人外发群消息时不要直接 @ 指定对象：
+
+```dotenv
+INFOFLOW_OUTBOUND_MENTION_BLACKLIST=user:alice,bot:17212
+```
+
+它不会屏蔽 `@all`，也不会影响用户入站触发、表情回复或处理中状态指示。
 
 `INFOFLOW_ROBOT_NAME` 仍按可选配置处理：当本地还没有持久化的
 `INFOFLOW_ROBOT_ID`，且机器人显示名缺失或已过期时，fresh install

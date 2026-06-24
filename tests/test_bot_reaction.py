@@ -95,6 +95,56 @@ def test_reaction_handle_bot_mentioned() -> None:
     assert h["group_id"] == "4507088"
 
 
+def test_reaction_handle_is_not_affected_by_outbound_mention_blacklist() -> None:
+    bot = _bot()
+    bot._settings["outbound_mention_blacklist"] = {"user_ids": ["bob"]}
+    msg = _group_msg(sender_id="bob", sender_name="Bob")
+    decision = PolicyDecision(
+        should_dispatch=True,
+        action=Action.DISPATCH,
+        trigger_reason="bot-mentioned",
+    )
+
+    h = bot._build_reaction_handle(msg, decision)
+
+    assert h is not None
+    assert h["from_uid"] == "bob"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_reaction_is_not_affected_by_outbound_mention_blacklist() -> None:
+    bot = _bot()
+    bot._settings["outbound_mention_blacklist"] = {"user_ids": ["bob"]}
+    msg = _group_msg(sender_id="bob", sender_name="Bob")
+    decision = PolicyDecision(
+        should_dispatch=True,
+        action=Action.DISPATCH,
+        trigger_reason="bot-mentioned",
+    )
+    adapter = MagicMock()
+    adapter.build_message_event = AsyncMock(return_value={"event": True})
+
+    async def _handle_message(_event):
+        await bot.send_message(group_id="4507088", text="NO_REPLY")
+
+    adapter.handle_message = AsyncMock(side_effect=_handle_message)
+
+    await bot.dispatch_inbound(msg, decision, adapter)
+    await _settle_reaction_tasks(bot)
+
+    bot._serverapi.add_message_reaction.assert_awaited_once()
+    add_kwargs = bot._serverapi.add_message_reaction.await_args.kwargs
+    assert add_kwargs["chat_type"] == "group"
+    assert add_kwargs["group_id"] == "4507088"
+    assert add_kwargs["from_uid"] == "bob"
+
+    bot._serverapi.delete_message_reaction.assert_awaited_once()
+    del_kwargs = bot._serverapi.delete_message_reaction.await_args.kwargs
+    assert del_kwargs["chat_type"] == "group"
+    assert del_kwargs["group_id"] == "4507088"
+    assert del_kwargs["from_uid"] == "bob"
+
+
 def test_slash_command_auth_accepts_any_configured_admin() -> None:
     bot = _bot(admin_uid="root,alice")
 

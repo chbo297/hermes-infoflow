@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .itypes import SendOptions
+from .mention_blacklist import outbound_mention_blacklist_sets
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ def extract_mentions(
     members: list[Any] | None,
     *,
     bot_agent_id: int | None = None,
+    outbound_mention_blacklist: Any = None,
 ) -> tuple[list[str], list[int], bool, list[str], str]:
     """Extract @ mentions from text and resolve them against group members.
 
@@ -52,6 +54,9 @@ def extract_mentions(
     bot_name_map: dict[str, int] | None = None
     seen_users: set[str] = set()
     seen_agents: set[int] = set()
+    blocked_users, blocked_agents = outbound_mention_blacklist_sets(
+        outbound_mention_blacklist
+    )
 
     if members:
         human_uids = {mb.uid for mb in members if not mb.is_bot}
@@ -79,6 +84,12 @@ def extract_mentions(
                     "[iflow:send] dropping self @-mention by agentId=%s", agent_id,
                 )
                 continue
+            if agent_id in blocked_agents:
+                logger.info(
+                    "[iflow:send] dropping blacklisted bot @-mention agentId=%s",
+                    agent_id,
+                )
+                continue
             if bot_aids is not None and agent_id in bot_aids:
                 agent_ids.append(agent_id)
                 seen_agents.add(agent_id)
@@ -86,6 +97,12 @@ def extract_mentions(
                 unmatched.append(name_part)
         else:
             if name_part in seen_users:
+                continue
+            if name_part in blocked_users:
+                logger.info(
+                    "[iflow:send] dropping blacklisted user @-mention user_id=%s",
+                    name_part,
+                )
                 continue
             if human_uids is not None and name_part in human_uids:
                 user_ids.append(name_part)
@@ -95,6 +112,13 @@ def extract_mentions(
                 if bot_agent_id is not None and agent_id == bot_agent_id:
                     logger.info(
                         "[iflow:send] dropping self @-mention by name=%r", name_part,
+                    )
+                    continue
+                if agent_id in blocked_agents:
+                    logger.info(
+                        "[iflow:send] dropping blacklisted bot @-mention name=%r agentId=%s",
+                        name_part,
+                        agent_id,
                     )
                     continue
                 if agent_id not in seen_agents:
@@ -150,13 +174,24 @@ def _merge_options(
 GetGroupMembers = Callable[..., Awaitable[list[Any]]]
 
 
-def _normalize_metadata_options(options: SendOptions, bot_agent_id: int | None) -> None:
+def _normalize_metadata_options(
+    options: SendOptions,
+    bot_agent_id: int | None,
+    outbound_mention_blacklist: Any = None,
+) -> None:
     """Deduplicate metadata options and drop invalid/self agent IDs."""
+    blocked_users, blocked_agents = outbound_mention_blacklist_sets(
+        outbound_mention_blacklist
+    )
     seen_users: set[str] = set()
     users: list[str] = []
+    dropped_blacklisted_users: list[str] = []
     for raw in options.mention_user_ids.split(","):
         item = raw.strip()
         if not item:
+            continue
+        if item in blocked_users:
+            dropped_blacklisted_users.append(item)
             continue
         if item in seen_users:
             continue
@@ -167,6 +202,7 @@ def _normalize_metadata_options(options: SendOptions, bot_agent_id: int | None) 
     seen_agents: set[int] = set()
     agents: list[str] = []
     invalid_agents: list[str] = []
+    dropped_blacklisted_agents: list[int] = []
     dropped_self = False
     for raw in options.mention_agent_ids.split(","):
         item = raw.strip()
@@ -178,6 +214,9 @@ def _normalize_metadata_options(options: SendOptions, bot_agent_id: int | None) 
         agent_id = int(item)
         if bot_agent_id is not None and agent_id == bot_agent_id:
             dropped_self = True
+            continue
+        if agent_id in blocked_agents:
+            dropped_blacklisted_agents.append(agent_id)
             continue
         if agent_id in seen_agents:
             continue
@@ -193,6 +232,12 @@ def _normalize_metadata_options(options: SendOptions, bot_agent_id: int | None) 
             "[iflow:send] dropping self @-mention from options (agentId=%s)",
             bot_agent_id,
         )
+    if dropped_blacklisted_users or dropped_blacklisted_agents:
+        logger.info(
+            "[iflow:send] dropping blacklisted @-mentions from options users=%s agents=%s",
+            dropped_blacklisted_users,
+            dropped_blacklisted_agents,
+        )
     options.mention_agent_ids = ",".join(agents)
 
 
@@ -204,6 +249,7 @@ async def prepare_outbound_message(
     get_group_members: GetGroupMembers | None = None,
     session: Any = None,
     bot_agent_id: int | None = None,
+    outbound_mention_blacklist: Any = None,
 ) -> tuple[str, SendOptions]:
     """Build send options and normalize text for all outbound entry points.
 
@@ -217,14 +263,20 @@ async def prepare_outbound_message(
     delivery, at the cost of skipping best-effort text @-mention extraction.
     """
     options = SendOptions.from_metadata(metadata)
-    _normalize_metadata_options(options, bot_agent_id)
+    _normalize_metadata_options(options, bot_agent_id, outbound_mention_blacklist)
     if group_id is None or not text or get_group_members is None:
         return text, options
 
     try:
         members = await get_group_members(str(group_id), session=session)
         user_ids, agent_ids, at_all, unmatched, text = extract_mentions(
-            text, members, bot_agent_id=bot_agent_id,
+            text,
+            members,
+            bot_agent_id=bot_agent_id,
+            outbound_mention_blacklist=outbound_mention_blacklist,
+        )
+        blocked_users, blocked_agents = outbound_mention_blacklist_sets(
+            outbound_mention_blacklist
         )
 
         if unmatched:
@@ -239,11 +291,17 @@ async def prepare_outbound_message(
                     if bot_agent_id is not None and agent_id == bot_agent_id:
                         unmatched.remove(mention)
                         continue
+                    if agent_id in blocked_agents:
+                        unmatched.remove(mention)
+                        continue
                     if any(member.is_bot and member.agent_id == agent_id for member in members):
                         if agent_id not in agent_ids:
                             agent_ids.append(agent_id)
                         unmatched.remove(mention)
                 else:
+                    if mention in blocked_users:
+                        unmatched.remove(mention)
+                        continue
                     if any(member.uid == mention for member in members if not member.is_bot):
                         if mention not in user_ids:
                             user_ids.append(mention)

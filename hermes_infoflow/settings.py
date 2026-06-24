@@ -15,6 +15,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .mention_blacklist import normalize_outbound_mention_blacklist
+
 logger = logging.getLogger(__name__)
 
 
@@ -401,6 +403,12 @@ def _read_account_settings(config: Any) -> dict[str, Any]:
             DEFAULT_IDLE_SESSION_RESET_SECONDS,
         ),
         "groups_raw": pick("INFOFLOW_GROUPS", "groups", None),
+        "outbound_mention_blacklist_raw": pick(
+            "INFOFLOW_OUTBOUND_MENTION_BLACKLIST",
+            "outbound_mention_blacklist",
+            "",
+            "outboundMentionBlacklist",
+        ),
         "state_dir_raw": pick("HERMES_STATE_DIR", "state_dir", None),
     }
 
@@ -492,6 +500,11 @@ def _read_account_settings(config: Any) -> dict[str, Any]:
             logger.warning("Ignoring malformed INFOFLOW_GROUPS JSON: %s", exc)
     settings["groups"] = groups_parsed
 
+    settings["outbound_mention_blacklist"] = normalize_outbound_mention_blacklist(
+        settings.pop("outbound_mention_blacklist_raw"),
+        log=logger,
+    )
+
     # State dir for the persistent sent-messages SQLite store. We default to
     # ``~/.hermes/state/infoflow`` so cron sub-processes can read what the
     # live adapter wrote.
@@ -556,6 +569,7 @@ def _env_enablement() -> dict | None:
         ("INFOFLOW_FOLLOW_UP_WINDOW", "follow_up_window"),
         ("INFOFLOW_IDLE_SESSION_RESET_SECONDS", "idle_session_reset_seconds"),
         ("INFOFLOW_GROUPS", "groups"),
+        ("INFOFLOW_OUTBOUND_MENTION_BLACKLIST", "outbound_mention_blacklist"),
         ("HERMES_STATE_DIR", "state_dir"),
         ("INFOFLOW_FILE_API_HOST", "file_api_host"),
         ("HERMES_INFOFLOW_INBOUND_FILE_DIR", "inbound_file_dir"),

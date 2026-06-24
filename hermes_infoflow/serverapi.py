@@ -48,6 +48,10 @@ from .itypes import (
     coerce_reply_target,
 )
 from .media import prepare_infoflow_image_bytes
+from .mention_blacklist import (
+    normalize_outbound_mention_blacklist,
+    outbound_mention_blacklist_sets,
+)
 from .utils import _ImageLoadError
 
 if TYPE_CHECKING:
@@ -1069,6 +1073,13 @@ class ServerAPI:
             app_agent_id=settings.get("app_agent_id"),
         )
         self._robot_id: str = str(settings.get("robot_id") or "")
+        self._outbound_mention_blacklist = normalize_outbound_mention_blacklist(
+            settings.get("outbound_mention_blacklist") or ""
+        )
+        (
+            self._blacklist_user_ids,
+            self._blacklist_agent_ids,
+        ) = outbound_mention_blacklist_sets(self._outbound_mention_blacklist)
         self._parser_account = _ParserAccountView(
             check_token=settings["check_token"],
             encoding_aes_key=settings["encoding_aes_key"],
@@ -1289,6 +1300,7 @@ class ServerAPI:
         mention_agent_ids: Any,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str | None]:
         warnings: list[dict[str, str]] = []
+        blacklist_filtered: list[str] = []
         raw_users: list[str] = []
         for raw in _coerce_string_list(mention_user_ids):
             item = raw.strip()
@@ -1299,6 +1311,9 @@ class ServerAPI:
             if item.startswith("user:"):
                 item = item[len("user:"):].strip()
             if item:
+                if item in self._blacklist_user_ids:
+                    blacklist_filtered.append(f"user:{item}")
+                    continue
                 raw_users.append(item)
         user_ids, users_deduped = _dedupe_keep_order(raw_users)
 
@@ -1320,6 +1335,9 @@ class ServerAPI:
             if self_agent_id and item == self_agent_id:
                 skipped_self = True
                 continue
+            if int(item) in self._blacklist_agent_ids:
+                blacklist_filtered.append(f"bot:{item}")
+                continue
             raw_agent_ids.append(item)
         agent_id_texts, agents_deduped = _dedupe_keep_order(raw_agent_ids)
         agent_ids = [int(item) for item in agent_id_texts]
@@ -1328,6 +1346,15 @@ class ServerAPI:
             warnings.append(_warning("deduplicated", "duplicate mentions were removed"))
         if skipped_self:
             warnings.append(_warning("self_mention_skipped", "current bot self mention was skipped"))
+        if blacklist_filtered:
+            logger.info(
+                "[iflow:send] outbound @ blacklist removed structured mentions: %s",
+                blacklist_filtered,
+            )
+            warnings.append(_warning(
+                "outbound_mention_blacklist",
+                "blacklisted @ mentions were removed",
+            ))
 
         items: list[dict[str, Any]] = []
         if coerce_bool(at_all):
@@ -1339,6 +1366,70 @@ class ServerAPI:
             items.append(specific)
         return items, warnings, None
 
+    def _filter_group_at_item_for_outbound_blacklist(
+        self,
+        item: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, bool]:
+        changed = False
+        at_all = bool(item.get("atall"))
+
+        user_ids: list[str] = []
+        removed_users: list[str] = []
+        for uid in item.get("atuserids") or []:
+            uid_s = str(uid or "").strip()
+            if not uid_s:
+                continue
+            if uid_s in self._blacklist_user_ids:
+                changed = True
+                removed_users.append(uid_s)
+                continue
+            if uid_s not in user_ids:
+                user_ids.append(uid_s)
+
+        agent_ids: list[int] = []
+        removed_agents: list[int] = []
+        for aid in item.get("atagentids") or []:
+            try:
+                aid_i = int(aid)
+            except (TypeError, ValueError):
+                continue
+            if aid_i in self._blacklist_agent_ids:
+                changed = True
+                removed_agents.append(aid_i)
+                continue
+            if aid_i not in agent_ids:
+                agent_ids.append(aid_i)
+
+        if removed_users or removed_agents:
+            logger.info(
+                "[iflow:send] outbound @ blacklist removed AT item users=%s agents=%s",
+                removed_users,
+                removed_agents,
+            )
+        return _at_item(at_all=at_all, user_ids=user_ids, agent_ids=agent_ids), changed
+
+    def _filter_group_body_for_outbound_blacklist(
+        self,
+        body: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Remove only outbound message AT targets covered by the blacklist."""
+        if not self._blacklist_user_ids and not self._blacklist_agent_ids:
+            return body, False
+
+        out: list[dict[str, Any]] = []
+        changed = False
+        for item in body:
+            if str(item.get("type") or "").upper() != "AT":
+                out.append(item)
+                continue
+            filtered, item_changed = self._filter_group_at_item_for_outbound_blacklist(
+                item,
+            )
+            changed = changed or item_changed or filtered is None
+            if filtered is not None:
+                out.append(filtered)
+        return out, changed
+
     def _group_text_body_items(
         self,
         text: str,
@@ -1348,13 +1439,13 @@ class ServerAPI:
         skip_at_all: bool = False,
         skip_user_ids: set[str] | None = None,
         skip_agent_ids: set[int] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         if not text:
-            return []
+            return [], False
         text_item_type = "MD" if str(text_type or "").upper() == "MD" else "TEXT"
         preserve_at_placeholders = text_item_type == "MD"
         if not maps:
-            return [{"type": text_item_type, "content": text}]
+            return [{"type": text_item_type, "content": text}], False
         human_uids: set[str] = maps.get("human_uids") or set()
         bot_aids: set[int] = maps.get("bot_aids") or set()
         bot_names: dict[str, int] = maps.get("bot_names") or {}
@@ -1365,6 +1456,7 @@ class ServerAPI:
         skip_user_ids = skip_user_ids or set()
         skip_agent_ids = skip_agent_ids or set()
         out: list[dict[str, Any]] = []
+        filtered_by_blacklist = False
         pos = 0
         for match in _SEND_AT_RE.finditer(text):
             if match.start() > 0 and text[match.start() - 1] not in " \t\r\n":
@@ -1377,14 +1469,33 @@ class ServerAPI:
                     item = _at_item(at_all=True)
             elif token.isdigit():
                 aid = int(token)
-                if aid != self_aid and aid in bot_aids and aid not in skip_agent_ids:
+                if aid in self._blacklist_agent_ids:
+                    filtered_by_blacklist = True
+                    logger.info(
+                        "[iflow:send] outbound @ blacklist removed inline bot agentId=%s",
+                        aid,
+                    )
+                elif aid != self_aid and aid in bot_aids and aid not in skip_agent_ids:
                     item = _at_item(agent_ids=[aid])
             elif token in human_uids:
-                if token not in skip_user_ids:
+                if token in self._blacklist_user_ids:
+                    filtered_by_blacklist = True
+                    logger.info(
+                        "[iflow:send] outbound @ blacklist removed inline user_id=%s",
+                        token,
+                    )
+                elif token not in skip_user_ids:
                     item = _at_item(user_ids=[token])
             elif token_lower in bot_names:
                 aid = bot_names[token_lower]
-                if aid != self_aid and aid not in skip_agent_ids:
+                if aid in self._blacklist_agent_ids:
+                    filtered_by_blacklist = True
+                    logger.info(
+                        "[iflow:send] outbound @ blacklist removed inline bot name=%s agentId=%s",
+                        token,
+                        aid,
+                    )
+                elif aid != self_aid and aid not in skip_agent_ids:
                     item = _at_item(agent_ids=[aid])
 
             if item is None:
@@ -1396,7 +1507,7 @@ class ServerAPI:
             pos = match.end()
         if pos < len(text):
             out.append({"type": text_item_type, "content": text[pos:]})
-        return out or [{"type": text_item_type, "content": text}]
+        return out or [{"type": text_item_type, "content": text}], filtered_by_blacklist
 
     async def _build_group_packets(
         self,
@@ -1408,8 +1519,11 @@ class ServerAPI:
         force_text_payload: bool,
         format_mode: str,
         session: aiohttp.ClientSession | None,
-    ) -> tuple[list[dict[str, Any]], str | None]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str | None]:
         maps = await self._group_member_maps(group_id, session=session)
+        explicit_at_items, filtered_by_blacklist = self._filter_group_body_for_outbound_blacklist(
+            explicit_at_items,
+        )
         has_any_image = any(seg["kind"] in ("image", "image_bytes") for seg in segments)
         packets: list[dict[str, Any]] = []
         current: list[dict[str, Any]] = []
@@ -1475,28 +1589,30 @@ class ServerAPI:
                     or has_any_image
                     or format_mode == "text"
                 ) else "MD"
-                current.extend(
-                    self._group_text_body_items(
-                        seg.get("text") or "",
-                        maps,
-                        text_type=text_type,
-                        skip_at_all=explicit_at_all,
-                        skip_user_ids=explicit_user_ids,
-                        skip_agent_ids=explicit_agent_ids,
-                    )
+                text_items, text_filtered_by_blacklist = self._group_text_body_items(
+                    seg.get("text") or "",
+                    maps,
+                    text_type=text_type,
+                    skip_at_all=explicit_at_all,
+                    skip_user_ids=explicit_user_ids | self._blacklist_user_ids,
+                    skip_agent_ids=explicit_agent_ids | self._blacklist_agent_ids,
                 )
+                filtered_by_blacklist = (
+                    filtered_by_blacklist or text_filtered_by_blacklist
+                )
+                current.extend(text_items)
                 continue
             if seg["kind"] in ("image", "image_bytes"):
                 if seg["kind"] == "image":
                     raw, err = await self._load_intent_image_bytes(seg["path"])
                     if err:
-                        return [], err
+                        return [], [], err
                 else:
                     raw = bytes(seg.get("bytes") or b"")
                 try:
                     prepared = prepare_infoflow_image_bytes(raw or b"")
                 except _ImageLoadError as exc:
-                    return [], str(exc)
+                    return [], [], str(exc)
                 if current_has_image:
                     flush_current()
                     ensure_explicit_at()
@@ -1510,7 +1626,15 @@ class ServerAPI:
         for link in links:
             current.append({"type": "LINK", "href": link["href"], "label": link["label"]})
         flush_current()
-        return packets, None
+        packet_warnings = (
+            [_warning(
+                "outbound_mention_blacklist",
+                "blacklisted @ mentions were removed",
+            )]
+            if filtered_by_blacklist
+            else []
+        )
+        return packets, packet_warnings, None
 
     async def _build_private_packets(
         self,
@@ -1715,7 +1839,7 @@ class ServerAPI:
             packet_segments = [{"kind": "text", "text": message_text}]
 
         force_text_payload = bool(reply_targets or packet_links) and not preserve_markdown
-        packets, err = await self._build_group_packets(
+        packets, packet_warnings, err = await self._build_group_packets(
             group_id=group_id,
             segments=packet_segments,
             links=packet_links,
@@ -1726,6 +1850,7 @@ class ServerAPI:
         )
         if err:
             return SentResult(success=False, error=err, warnings=tuple(warnings))
+        warnings.extend(packet_warnings)
         if not packets and reply_targets:
             packets = [{
                 "body": [{"type": "TEXT", "content": ""}],
@@ -2128,6 +2253,21 @@ class ServerAPI:
         )
         if err:
             return SentResult(success=False, error=err)
+        body, filtered_mentions = self._filter_group_body_for_outbound_blacklist(
+            body,
+        )
+        if filtered_mentions:
+            warnings.append(_warning(
+                "outbound_mention_blacklist",
+                "blacklisted @ mentions were removed",
+            ))
+        if not body:
+            return SentResult(
+                success=False,
+                error_code="empty_message",
+                error="group body is empty after outbound @ blacklist",
+                warnings=tuple(warnings),
+            )
         async with self._ensure_session(session) as sess:
             reply_ctx = None
             if reply_targets:

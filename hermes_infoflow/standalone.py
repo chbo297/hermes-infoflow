@@ -155,6 +155,7 @@ async def standalone_send(
             metadata=metadata,
             get_group_members=serverapi.get_group_members,
             bot_agent_id=settings.get("app_agent_id"),
+            outbound_mention_blacklist=settings.get("outbound_mention_blacklist"),
         )
 
     if not prepared_message.strip() and not image_payloads:
