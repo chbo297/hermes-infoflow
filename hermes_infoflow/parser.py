@@ -237,6 +237,42 @@ def _record_ignore_reason(reason_out: list[str] | None, reason: str) -> None:
         reason_out.append(reason)
 
 
+def _reaction_ack_reason(msg_data: dict[str, Any]) -> str:
+    event_type = _stringify(
+        msg_data.get("eventType")
+        or msg_data.get("eventtype")
+        or msg_data.get("EventType")
+    ).upper()
+    if event_type not in {"EMOJI_REPLY_ADD", "EMOJI_REPLY_DELETE"}:
+        return ""
+    action = "add" if event_type == "EMOJI_REPLY_ADD" else "delete"
+    group_id = _stringify(
+        msg_data.get("groupId")
+        or msg_data.get("groupid")
+        or msg_data.get("GroupId")
+    )
+    msg_id = _stringify(
+        msg_data.get("MsgId")
+        or msg_data.get("msgId")
+        or msg_data.get("msgid")
+    )
+    op_from = _stringify(
+        msg_data.get("opFrom")
+        or msg_data.get("opfrom")
+        or msg_data.get("OpFrom")
+    )
+    emoji_content = _stringify(
+        msg_data.get("emojiContent")
+        or msg_data.get("emojicontent")
+        or msg_data.get("EmojiContent")
+    )
+    return (
+        f"reaction_ack action={action} groupId={group_id or '-'} "
+        f"msgId={msg_id or '-'} opFrom={op_from or '-'} "
+        f"emojiContent={emoji_content or '-'}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Large-integer ID precision protection
 # ---------------------------------------------------------------------------
@@ -854,6 +890,11 @@ def build_group_inbound(
     ignore_reasons: list[str] | None = None,
 ) -> InboundMessage | None:
     """Translate a decrypted group-chat ``msgData`` to ``InboundMessage``."""
+    reaction_ack = _reaction_ack_reason(msg_data)
+    if reaction_ack:
+        _record_ignore_reason(ignore_reasons, reaction_ack)
+        return None
+
     message = msg_data.get("message") if isinstance(msg_data.get("message"), dict) else None
     header = (message or {}).get("header") if isinstance(message, dict) else None
     if not isinstance(header, dict):

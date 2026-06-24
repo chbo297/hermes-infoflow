@@ -1135,6 +1135,29 @@ def test_group_ignored_missing_from_user_keeps_decoded_payload(account):
     assert res.diagnostic_reason.startswith("group_missing_from_user")
 
 
+def test_group_reaction_ack_is_ignored_without_missing_sender_warning(account):
+    acct, raw_key = account
+    payload = {
+        "eventType": "EMOJI_REPLY_ADD",
+        "groupId": 5030485518,
+        "MsgId": "1868844155031119659",
+        "opFrom": "4105000875",
+        "emojiContent": "d135",
+    }
+    plaintext = json.dumps(payload, ensure_ascii=False)
+    ct = aes_ecb_encrypt_b64url(plaintext, raw_key)
+
+    res = parser.parse_webhook(content_type="text/plain", raw_body=ct, account=acct)
+
+    assert res.kind == "ignored"
+    assert res.decoded_payload == plaintext
+    assert res.diagnostic_reason == (
+        "reaction_ack action=add groupId=5030485518 "
+        "msgId=1868844155031119659 opFrom=4105000875 emojiContent=d135"
+    )
+    assert "group_missing_from_user" not in res.diagnostic_reason
+
+
 def test_group_ignored_empty_content_keeps_decoded_payload(account):
     acct, raw_key = account
     payload = {

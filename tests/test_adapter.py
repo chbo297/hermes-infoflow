@@ -2091,6 +2091,41 @@ def test_handle_webhook_logs_ignored_decoded_payload(
     assert plaintext in caplog.text
 
 
+def test_handle_webhook_logs_reaction_ack_without_ignored_warning(
+    configured_env, caplog,
+) -> None:
+    raw_key, _ = configured_env
+    adapter = InfoflowAdapter(_make_config())
+    payload = {
+        "eventType": "EMOJI_REPLY_DELETE",
+        "groupId": 5030485518,
+        "MsgId": "1868844155031119659",
+        "opFrom": "4105000875",
+        "emojiContent": "d135",
+    }
+    plaintext = json.dumps(payload, ensure_ascii=False)
+    ct = aes_ecb_encrypt_b64url(plaintext, raw_key)
+    request = _make_request(content_type="text/plain", body=ct.encode("utf-8"))
+
+    caplog.set_level(logging.INFO, logger="gateway.run")
+
+    async def _go():
+        return await adapter._webhook_server._handle_request(request)
+
+    response = asyncio.run(_go())
+
+    assert response.status == 200
+    assert "[iflow:reaction_ack]" in caplog.text
+    assert "action=delete" in caplog.text
+    assert "groupId=5030485518" in caplog.text
+    assert "msgId=1868844155031119659" in caplog.text
+    assert "opFrom=4105000875" in caplog.text
+    assert "emojiContent=d135" in caplog.text
+    assert "[iflow:raw] kind=ignored" not in caplog.text
+    assert "group_missing_from_user" not in caplog.text
+    assert plaintext in caplog.text
+
+
 def test_handle_webhook_logs_full_message_decoded_payload(
     configured_env, caplog,
 ) -> None:

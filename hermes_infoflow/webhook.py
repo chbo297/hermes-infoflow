@@ -139,6 +139,13 @@ def _log_decoded_payload(
             decoded_payload,
         )
         return
+    if reason.startswith("reaction_ack "):
+        gw_log().info(
+            "[iflow:reaction_ack] %s payload=%s",
+            reason.removeprefix("reaction_ack "),
+            decoded_payload,
+        )
+        return
     gw_log().warning(
         "[iflow:raw] kind=%s reason=%s payload=%s",
         kind,
