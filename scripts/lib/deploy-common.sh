@@ -825,20 +825,22 @@ launchd_targets_for_label() {
   printf 'user/%s/%s\n' "$(id -u)" "$label"
 }
 
-launchd_first_target_for_label() {
-  local label="$1"
-  launchd_targets_for_label "$label" | sed -n '1p'
-}
-
-launchd_gateway_loaded() {
+launchd_loaded_target_for_label() {
   local label="$1" target
   while IFS= read -r target; do
     [[ -n "$target" ]] || continue
     if launchctl print "$target" >/dev/null 2>&1; then
+      printf '%s\n' "$target"
       return 0
     fi
   done < <(launchd_targets_for_label "$label")
   return 1
+}
+
+launchd_gateway_loaded() {
+  local label="$1" target
+  target="$(launchd_loaded_target_for_label "$label")"
+  [[ -n "$target" ]]
 }
 
 launchd_running_target_for_label() {
@@ -933,7 +935,7 @@ restart_running_launchd_gateway() {
     fi
     if launchd_gateway_loaded "$label"; then
       loaded=1
-      target="$(launchd_first_target_for_label "$label")"
+      target="$(launchd_loaded_target_for_label "$label")"
       echo "  - launchd gateway $label is loaded but not running; skipping restart. Checked target: $target"
     fi
   done < <(collect_launchd_gateway_labels)
@@ -995,7 +997,7 @@ esac
 # is the user's choice — they may want to verify config before starting.
 if [[ "$DRY_RUN" == "true" ]]; then
   echo "  gateway restart policy: $GATEWAY_RESTART_POLICY"
-  echo "$ launchctl print gui/\$(id -u)/<label> || hermes gateway status (dry-run, skipping)"
+  echo "$ launchctl print gui/\$(id -u)/<label> || launchctl print user/\$(id -u)/<label> || hermes gateway status (dry-run, skipping)"
   echo "==> Done (dry-run)"
   exit 0
 fi
