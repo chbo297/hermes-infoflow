@@ -122,6 +122,13 @@ def test_register_registers_platform_and_tool() -> None:
     assert send_tool["toolset"] == "infoflow"
     assert send_tool["is_async"] is True
     assert send_tool["schema"]["parameters"]["required"] == ["target"]
+    send_schema_text = str(send_tool["schema"])
+    assert "内部身份标记" in send_schema_text
+    assert "(user_id:...)" in send_schema_text
+    assert "(agent_id:...)" in send_schema_text
+    assert "@uuapName" in send_schema_text
+    assert "mention_user_ids" in send_schema_text
+    assert "mention_agent_ids" in send_schema_text
     schemas_text = str([tool["schema"] for tool in ctx.tools])
     for forbidden in (
         "richtext_links",

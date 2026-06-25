@@ -249,6 +249,8 @@ def test_group_and_dm_prompt_fragments_keep_only_their_differences() -> None:
     assert "mentions_you" in _GROUP_FORMAT_DOC
     assert "matches_attention_regex" in _GROUP_FORMAT_DOC
     assert "群聊 @ 规则" in _GROUP_MENTION_RULES_DOC
+    assert "内部身份标记" in _GROUP_MENTION_RULES_DOC
+    assert "出站正文禁止包含 `(user_id:...)` 或 `(agent_id:...)`" in _GROUP_MENTION_RULES_DOC
     assert "quotes_your_message" in _DM_FORMAT_DOC
     assert "群聊 @ 规则" not in _DM_FORMAT_DOC
     assert "mentions_you" not in _DM_FORMAT_DOC
