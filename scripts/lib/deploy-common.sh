@@ -816,31 +816,53 @@ gateway_status_indicates_running() {
     return 1
   fi
   printf '%s\n' "$text" | grep -Eiq \
-    "Runtime:[[:space:]]*running|status:[[:space:]]*running|state[[:space:]]*=[[:space:]]*running|Gateway .*running"
+    "Runtime:[[:space:]]*running|status:[[:space:]]*running|state[[:space:]]*=[[:space:]]*running|Gateway .*running|\"?PID\"?[[:space:]]*=[[:space:]]*[1-9][0-9]*"
 }
 
-launchd_target_for_label() {
+launchd_targets_for_label() {
   local label="$1"
   printf 'gui/%s/%s\n' "$(id -u)" "$label"
+  printf 'user/%s/%s\n' "$(id -u)" "$label"
+}
+
+launchd_first_target_for_label() {
+  local label="$1"
+  launchd_targets_for_label "$label" | sed -n '1p'
 }
 
 launchd_gateway_loaded() {
-  local label="$1"
-  local target
-  target="$(launchd_target_for_label "$label")"
-  launchctl print "$target" >/dev/null 2>&1
+  local label="$1" target
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    if launchctl print "$target" >/dev/null 2>&1; then
+      return 0
+    fi
+  done < <(launchd_targets_for_label "$label")
+  return 1
+}
+
+launchd_running_target_for_label() {
+  local label="$1" output rc target
+  while IFS= read -r target; do
+    [[ -n "$target" ]] || continue
+    set +e
+    output="$(launchctl print "$target" 2>/dev/null)"
+    rc=$?
+    set -e
+    [[ "$rc" -eq 0 ]] || continue
+    if printf '%s\n' "$output" | grep -Eq "state = running|pid = [1-9][0-9]*"; then
+      printf '%s\n' "$target"
+      return 0
+    fi
+  done < <(launchd_targets_for_label "$label")
+  return 1
 }
 
 launchd_gateway_running() {
   local label="$1"
-  local output rc target
-  target="$(launchd_target_for_label "$label")"
-  set +e
-  output="$(launchctl print "$target" 2>/dev/null)"
-  rc=$?
-  set -e
-  [[ "$rc" -eq 0 ]] || return 1
-  printf '%s\n' "$output" | grep -Eq "state = running|pid = [1-9][0-9]*"
+  local target
+  target="$(launchd_running_target_for_label "$label")"
+  [[ -n "$target" ]]
 }
 
 wait_for_launchd_gateway_running() {
@@ -894,8 +916,8 @@ restart_running_launchd_gateway() {
   while IFS= read -r label; do
     [[ -n "$label" ]] || continue
     found=1
-    target="$(launchd_target_for_label "$label")"
-    if launchd_gateway_running "$label"; then
+    target="$(launchd_running_target_for_label "$label")"
+    if [[ -n "$target" ]]; then
       echo "==> Gateway is running under launchd ($label); restarting to load the updated plugin"
       echo "$ launchctl kickstart -k $target"
       if ! launchctl kickstart -k "$target"; then
@@ -911,7 +933,8 @@ restart_running_launchd_gateway() {
     fi
     if launchd_gateway_loaded "$label"; then
       loaded=1
-      echo "  - launchd gateway $label is loaded but not running; skipping restart."
+      target="$(launchd_first_target_for_label "$label")"
+      echo "  - launchd gateway $label is loaded but not running; skipping restart. Checked target: $target"
     fi
   done < <(collect_launchd_gateway_labels)
 
