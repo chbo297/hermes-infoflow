@@ -227,6 +227,26 @@ def test_infoflow_send_message_rejects_removed_richtext_links(monkeypatch) -> No
     assert adapter._serverapi.group_calls == []
 
 
+def test_infoflow_send_message_skips_duplicate_cron_auto_delivery(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", "infoflow")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", "group:4507088")
+    monkeypatch.setenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID", "")
+    monkeypatch.setattr(tools_mod, "_get_live_adapter", lambda: None)
+
+    raw = asyncio.run(make_send_message_handler()({
+        "target": "group:4507088",
+        "message": "cron content",
+    }))
+
+    result = json.loads(raw)
+    assert result["success"] is True
+    assert result["skipped"] is True
+    assert result["reason"] == "cron_auto_delivery_duplicate_target"
+    assert result["target"] == "infoflow:group:4507088"
+
+
 def test_infoflow_send_message_private_mentions_are_ignored_with_warning(
     monkeypatch,
 ) -> None:
@@ -439,6 +459,88 @@ def test_infoflow_send_message_group_dispatches_semantic_parameters(
     assert call["reply_to"] == [{"message_id": "MID", "preview": "引用预览"}]
     assert call["mention_user_ids"] == ["chengbo05"]
     assert call["mention_agent_ids"] == ["bot:17212"]
+
+
+def test_infoflow_send_message_group_normalizes_internal_at_marker(
+    monkeypatch,
+) -> None:
+    adapter = _Adapter()
+    monkeypatch.setattr(tools_mod, "_get_live_adapter", lambda: adapter)
+
+    raw = asyncio.run(make_send_message_handler()({
+        "target": "group:11324076",
+        "message": "@武杰 (user_id:wujie15) 是同样的分页问题",
+        "mention_user_ids": ["owner", "wujie15"],
+    }))
+
+    result = json.loads(raw)
+    assert result["success"] is True
+    call = adapter._serverapi.group_calls[0]
+    assert call["group_id"] == "11324076"
+    assert call["message"] == "@wujie15 是同样的分页问题"
+    assert call["mention_user_ids"] == ["owner", "wujie15"]
+    assert "user_id:" not in call["message"]
+
+
+def test_infoflow_send_message_private_strips_internal_at_marker(
+    monkeypatch,
+) -> None:
+    adapter = _Adapter()
+    monkeypatch.setattr(tools_mod, "_get_live_adapter", lambda: adapter)
+
+    raw = asyncio.run(make_send_message_handler()({
+        "target": "user:chengbo05",
+        "message": "请 @武杰 (user_id:wujie15) 看一下",
+    }))
+
+    result = json.loads(raw)
+    assert result == {
+        "success": True,
+        "target": "user:chengbo05",
+        "chat_type": "private",
+        "sent_messages": [
+            {"message_id": "P1", "kind": "text", "preview": "请 @武杰 看一下"}
+        ],
+    }
+    call = adapter._serverapi.private_calls[0]
+    assert call["message"] == "请 @武杰 看一下"
+    assert "mention_user_ids" not in call
+
+
+def test_infoflow_send_message_group_keeps_self_agent_marker_plain(
+    monkeypatch,
+) -> None:
+    adapter = _Adapter()
+    adapter._settings["app_agent_id"] = "6471"
+    monkeypatch.setattr(tools_mod, "_get_live_adapter", lambda: adapter)
+
+    raw = asyncio.run(make_send_message_handler()({
+        "target": "group:4507088",
+        "message": "@chengbo5.1 (agent_id:6471) 收到",
+    }))
+
+    result = json.loads(raw)
+    assert result["success"] is True
+    call = adapter._serverapi.group_calls[0]
+    assert call["message"] == "@chengbo5.1 收到"
+    assert call["mention_agent_ids"] is None
+
+
+def test_infoflow_send_message_coerces_non_string_message(
+    monkeypatch,
+) -> None:
+    adapter = _Adapter()
+    monkeypatch.setattr(tools_mod, "_get_live_adapter", lambda: adapter)
+
+    raw = asyncio.run(make_send_message_handler()({
+        "target": "group:4507088",
+        "message": 123,
+    }))
+
+    result = json.loads(raw)
+    assert result["success"] is True
+    call = adapter._serverapi.group_calls[0]
+    assert call["message"] == "123"
 
 
 def test_infoflow_send_message_group_media_paths_stay_semantic(

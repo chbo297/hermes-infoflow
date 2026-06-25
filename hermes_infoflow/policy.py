@@ -819,6 +819,8 @@ _GROUP_MENTION_RULES_DOC = """\
 - 机器人：正文写 `@<agent_id>`；也可把 agent_id 传给 `infoflow_send_message.mention_agent_ids`。
 - 所有人：正文写 `@all`；也可传 `infoflow_send_message.at_all=true`。
 
+历史正文里的 `@显示名 (user_id:<user_id>)`、`@显示名 (agent_id:<agent_id>)` 是插件给你的内部身份标记，不是用户可见正文。出站正文禁止包含 `(user_id:...)` 或 `(agent_id:...)`；如果要真正 @，只输出 `@<user_id>`/`@<agent_id>` 或填写上面的 mention 字段。
+
 @ 占位必须是完整 token：`@` 和 id 中间不要有空格；token 前面应为行首或空白，后面应为空白、换行或消息结束。
 正确示例：`请看 @<user_id> 这个问题`
 错误示例：`请看@<user_id>`

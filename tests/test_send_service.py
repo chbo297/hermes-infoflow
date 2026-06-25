@@ -10,6 +10,7 @@ from hermes_infoflow.send_service import InfoflowSendService
 
 class _ServerAPI:
     def __init__(self) -> None:
+        self._settings = {"app_agent_id": "999"}
         self.group_calls: list[dict] = []
         self.private_calls: list[dict] = []
 
@@ -119,6 +120,49 @@ def test_send_service_preview_strips_internal_at_metadata() -> None:
     assert serverapi.group_calls[0]["reply_to"] == [
         {"message_id": "MID", "preview": "@chengbo5.1 请引用这条消息"}
     ]
+
+
+def test_send_service_group_normalizes_internal_at_marker() -> None:
+    serverapi = _ServerAPI()
+    service = InfoflowSendService(serverapi=serverapi)
+
+    asyncio.run(service.send_group(
+        "11324076",
+        message="@武杰 (user_id:wujie15) 是同样的分页问题",
+        mention_user_ids=["owner"],
+    ))
+
+    call = serverapi.group_calls[0]
+    assert call["message"] == "@wujie15 是同样的分页问题"
+    assert call["mention_user_ids"] == ["owner", "wujie15"]
+
+
+def test_send_service_private_strips_internal_at_marker() -> None:
+    serverapi = _ServerAPI()
+    service = InfoflowSendService(serverapi=serverapi)
+
+    asyncio.run(service.send_private(
+        "chengbo05",
+        message="请 @武杰 (user_id:wujie15) 看一下",
+    ))
+
+    call = serverapi.private_calls[0]
+    assert call["message"] == "请 @武杰 看一下"
+
+
+def test_send_service_group_keeps_self_agent_marker_plain() -> None:
+    serverapi = _ServerAPI()
+    serverapi._settings["app_agent_id"] = "6471"
+    service = InfoflowSendService(serverapi=serverapi)
+
+    asyncio.run(service.send_group(
+        "4507088",
+        message="@chengbo5.1 (agent_id:6471) 收到",
+    ))
+
+    call = serverapi.group_calls[0]
+    assert call["message"] == "@chengbo5.1 收到"
+    assert call["mention_agent_ids"] is None
 
 
 def test_send_service_auto_preview_rebuilds_group_raw_body_with_reply_placeholder() -> None:

@@ -21,6 +21,7 @@ from .inbound_files import (
 )
 from .llm_format import format_created_time_ms, format_dm_record, format_group_record
 from .media import prepare_infoflow_image_bytes
+from .outbound import normalize_internal_at_markers_for_send
 from .prompt_rules import INFOFLOW_DELIVERY_TOOL_RULES
 from .send_service import InfoflowSendService
 from .settings import parse_infoflow_admin_users
@@ -267,6 +268,9 @@ SEND_MESSAGE_TOOL_SCHEMA = {
         "preview 填该片段。群聊一次最多引用一条，私聊可引用多条。\n\n"
         "群聊 @：正文写 `@uuapName`、`@agentId`、`@all`，或使用 "
         "`at_all`、`mention_user_ids`、`mention_agent_ids`。"
+        "历史正文里的 `@显示名 (user_id:uuapName)`、"
+        "`@显示名 (agent_id:agentId)` 是内部身份标记；发送时不要复制这些括号标记，"
+        "需要真正 @ 时只输出 `@uuapName`/`@agentId` 或填写 mention 字段。"
         "私聊没有真正 @，正文 `@xxx` 按普通文本展示。"
     ),
     "parameters": {
@@ -291,6 +295,9 @@ SEND_MESSAGE_TOOL_SCHEMA = {
                     "HTTP/HTTPS jpg/png/gif/webp 图片 URL（包括内网 URL）需要以内联方式显示时，"
                     "保持 `format=auto` 或使用 `format=markdown`，并在正文中写 "
                     "`![图片说明](URL)`；其它文件 URL 用普通链接。"
+                    "不要把历史中的 `(user_id:...)` 或 `(agent_id:...)` "
+                    "内部身份标记写进最终正文；群聊真 @ 使用 `@uuapName`/`@agentId` "
+                    "或 mention 字段。"
                 ),
             },
             "format": {
@@ -1704,6 +1711,34 @@ def make_send_message_handler():
                 error=target_error or "invalid target",
             )
 
+        # Cron auto-delivery dedup: if this run's scheduler will auto-deliver
+        # the agent's final response to the same target we're about to send to,
+        # skip the explicit send and instruct the model to put content in its
+        # final response instead. Mirrors core send_message_tool behavior.
+        auto_target = _cron_auto_delivery_target()
+        if auto_target and auto_target.get("platform") == "infoflow":
+            # Infoflow has no threads; scheduler writes "" for None thread_id.
+            if auto_target.get("thread_id") in (None, "", "None"):
+                want = str(auto_target.get("chat_id") or "").strip()
+                # Cron sets chat_id as the infoflow target string,
+                # e.g. "group:12861893" or "user:<uid>". _parse_send_target's
+                # "target" field uses the same canonical form.
+                if want and want == target["target"]:
+                    target_label = f"infoflow:{target['target']}"
+                    return json.dumps({
+                        "success": True,
+                        "skipped": True,
+                        "reason": "cron_auto_delivery_duplicate_target",
+                        "target": target_label,
+                        "note": (
+                            f"Skipped send_message to {target_label}. This cron "
+                            f"job will already auto-deliver its final response to "
+                            f"that same target. Put the intended user-facing content "
+                            f"in your final response instead, or use a different "
+                            f"target if you want an additional message."
+                        ),
+                    })
+
         adapter = _get_live_adapter()
         if adapter is None:
             return _send_failure_payload(
@@ -1735,31 +1770,44 @@ def make_send_message_handler():
             getattr(adapter, "_http_session", None)
         )
         warnings: list[dict[str, str]] = []
+        settings = getattr(adapter, "_settings", {}) or {}
+        send_metadata = {
+            "at_all": args.get("at_all"),
+            "mention_user_ids": args.get("mention_user_ids"),
+            "mention_agent_ids": args.get("mention_agent_ids"),
+        }
+        message, send_metadata = normalize_internal_at_markers_for_send(
+            args.get("message"),
+            send_metadata,
+            is_group=target["chat_type"] == "group",
+            bot_agent_id=settings.get("app_agent_id"),
+        )
+        send_metadata = send_metadata or {}
 
         if target["chat_type"] == "group":
             result = await send_service.send_group(
                 target["group_id"],
-                message=args.get("message"),
+                message=message,
                 format=args.get("format", "auto"),
                 links=args.get("links"),
                 image_paths=args.get("image_paths"),
                 reply_to=args.get("reply_to"),
-                at_all=args.get("at_all"),
-                mention_user_ids=args.get("mention_user_ids"),
-                mention_agent_ids=args.get("mention_agent_ids"),
+                at_all=send_metadata.get("at_all"),
+                mention_user_ids=send_metadata.get("mention_user_ids"),
+                mention_agent_ids=send_metadata.get("mention_agent_ids"),
                 session=session,
             )
         else:
             result = await send_service.send_private(
                 target["dm_user"],
-                message=args.get("message"),
+                message=message,
                 format=args.get("format", "auto"),
                 links=args.get("links"),
                 image_paths=args.get("image_paths"),
                 reply_to=args.get("reply_to"),
-                at_all=args.get("at_all"),
-                mention_user_ids=args.get("mention_user_ids"),
-                mention_agent_ids=args.get("mention_agent_ids"),
+                at_all=send_metadata.get("at_all"),
+                mention_user_ids=send_metadata.get("mention_user_ids"),
+                mention_agent_ids=send_metadata.get("mention_agent_ids"),
                 session=session,
             )
 

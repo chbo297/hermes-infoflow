@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -15,6 +16,13 @@ logger = logging.getLogger(__name__)
 # Match @xxx where xxx is 1-30 chars excluding @, space, newline,
 # followed by whitespace or end-of-string.
 _AT_RE = re.compile(r"@([^\s@\n]{1,30})(?=[\s]|$)")
+_INTERNAL_AT_MARKER_RE = re.compile(
+    r"@(?P<display>[^@\n()]{1,80}?)\s+"
+    r"\((?P<kind>user_id|agent_id):\s*(?P<identifier>[^)\s]+)\s*\)"
+)
+_INTERNAL_ID_MARKER_RE = re.compile(
+    r"\s*\((?:user_id|agent_id):[^)]*\)"
+)
 
 
 def _at_iter(text: str) -> list[tuple[str, int, int]]:
@@ -25,6 +33,106 @@ def _at_iter(text: str) -> list[tuple[str, int, int]]:
             continue
         results.append((match.group(0), match.start(), match.end()))
     return results
+
+
+def _metadata_string_values(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[,，\s]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = []
+        for item in value:
+            if isinstance(item, str) and ("," in item or "，" in item):
+                raw_items.extend(re.split(r"[,，\s]+", item))
+            else:
+                raw_items.append(str(item))
+    else:
+        raw_items = [str(value)]
+    return [item.strip() for item in raw_items if item and item.strip()]
+
+
+def _merge_metadata_values(value: Any, additions: list[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for raw in [*_metadata_string_values(value), *additions]:
+        item = str(raw or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    return merged
+
+
+def _can_promote_internal_marker_to_structured(text: str, start: int) -> bool:
+    if start <= 0:
+        return True
+    prev = text[start - 1]
+    if prev.isspace():
+        return True
+    return unicodedata.category(prev)[0] in {"P", "S"}
+
+
+def normalize_internal_at_markers_for_send(
+    text: str | None,
+    metadata: dict[str, Any] | None = None,
+    *,
+    is_group: bool,
+    bot_agent_id: Any = None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Strip LLM-visible internal @ annotations before sending.
+
+    Inbound history renders structured Infoflow AT items as
+    ``@Display (user_id:uid)`` or ``@Display (agent_id:123)`` so the model can
+    see both the display name and stable identity. Those parenthesized markers
+    are internal annotations and must never be sent back as visible text.
+    """
+    if text is None:
+        return text, dict(metadata) if metadata is not None else None
+    text = str(text or "")
+
+    user_ids: list[str] = []
+    agent_ids: list[str] = []
+    self_agent_id = str(bot_agent_id or "").strip()
+
+    def _replacement(match: re.Match[str]) -> str:
+        display = re.sub(r"\s+", " ", match.group("display")).strip()
+        identifier = str(match.group("identifier") or "").strip()
+        kind = match.group("kind")
+        if not display or not identifier:
+            return match.group(0)
+        if not is_group or not _can_promote_internal_marker_to_structured(
+            text,
+            match.start(),
+        ):
+            return f"@{display}"
+        if kind == "user_id":
+            user_ids.append(identifier)
+            return f"@{identifier}"
+        if identifier.isdigit():
+            if self_agent_id and identifier == self_agent_id:
+                return f"@{display}"
+            agent_ids.append(identifier)
+            return f"@{identifier}"
+        return f"@{display}"
+
+    normalized_text = _INTERNAL_AT_MARKER_RE.sub(_replacement, text)
+    normalized_text = _INTERNAL_ID_MARKER_RE.sub("", normalized_text)
+    if not user_ids and not agent_ids:
+        return normalized_text, dict(metadata) if metadata is not None else None
+
+    normalized_metadata = dict(metadata or {})
+    if user_ids:
+        normalized_metadata["mention_user_ids"] = _merge_metadata_values(
+            normalized_metadata.get("mention_user_ids"),
+            user_ids,
+        )
+    if agent_ids:
+        normalized_metadata["mention_agent_ids"] = _merge_metadata_values(
+            normalized_metadata.get("mention_agent_ids"),
+            agent_ids,
+        )
+    return normalized_text, normalized_metadata
 
 
 def extract_mentions(
@@ -262,6 +370,13 @@ async def prepare_outbound_message(
     options. This keeps transient directory failures from blocking outbound
     delivery, at the cost of skipping best-effort text @-mention extraction.
     """
+    text, metadata = normalize_internal_at_markers_for_send(
+        text,
+        metadata,
+        is_group=group_id is not None,
+        bot_agent_id=bot_agent_id,
+    )
+    text = text or ""
     options = SendOptions.from_metadata(metadata)
     _normalize_metadata_options(options, bot_agent_id, outbound_mention_blacklist)
     if group_id is None or not text or get_group_members is None:

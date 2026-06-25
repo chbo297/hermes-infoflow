@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from .coerce import coerce_bool
 from .itypes import SentResult
+from .outbound import normalize_internal_at_markers_for_send
 
 if TYPE_CHECKING:  # pragma: no cover
     from .serverapi import ServerAPI
@@ -173,6 +174,10 @@ class InfoflowSendService:
         self._inbound_body_lookup = inbound_body_lookup
         self._inbound_sender_imid_lookup = inbound_sender_imid_lookup
 
+    def _bot_agent_id(self) -> Any:
+        settings = getattr(self._serverapi, "_settings", {}) or {}
+        return settings.get("app_agent_id") if isinstance(settings, dict) else None
+
     async def send_group(
         self,
         group_id: str,
@@ -191,15 +196,27 @@ class InfoflowSendService:
         reply_targets, err = self._normalize_reply_to(reply_to)
         if err:
             return SentResult(success=False, error_code="invalid_reply_to", error=err)
+        send_metadata = {
+            "at_all": at_all,
+            "mention_user_ids": mention_user_ids,
+            "mention_agent_ids": mention_agent_ids,
+        }
+        message, send_metadata = normalize_internal_at_markers_for_send(
+            message,
+            send_metadata,
+            is_group=True,
+            bot_agent_id=self._bot_agent_id(),
+        )
+        send_metadata = send_metadata or {}
         kwargs = {
             "message": message,
             "format": format,
             "links": links,
             "image_paths": image_paths,
             "reply_to": reply_targets,
-            "at_all": at_all,
-            "mention_user_ids": mention_user_ids,
-            "mention_agent_ids": mention_agent_ids,
+            "at_all": send_metadata.get("at_all"),
+            "mention_user_ids": send_metadata.get("mention_user_ids"),
+            "mention_agent_ids": send_metadata.get("mention_agent_ids"),
             "session": session,
         }
         if image_bytes is not None:
@@ -221,11 +238,23 @@ class InfoflowSendService:
         mention_agent_ids: Any = None,
         session: Any = None,
     ) -> SentResult:
+        send_metadata = {
+            "at_all": at_all,
+            "mention_user_ids": mention_user_ids,
+            "mention_agent_ids": mention_agent_ids,
+        }
+        message, send_metadata = normalize_internal_at_markers_for_send(
+            message,
+            send_metadata,
+            is_group=False,
+            bot_agent_id=self._bot_agent_id(),
+        )
+        send_metadata = send_metadata or {}
         warnings: list[dict[str, str]] = []
         if (
-            coerce_bool(at_all)
-            or bool(_coerce_string_list(mention_user_ids))
-            or bool(_coerce_string_list(mention_agent_ids))
+            coerce_bool(send_metadata.get("at_all"))
+            or bool(_coerce_string_list(send_metadata.get("mention_user_ids")))
+            or bool(_coerce_string_list(send_metadata.get("mention_agent_ids")))
         ):
             warnings.append(_warning(
                 "private_mentions_ignored",

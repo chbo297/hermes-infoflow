@@ -49,6 +49,114 @@ async def test_prepare_outbound_message_refreshes_members_for_unmatched_mentions
     assert calls[1]["force_refresh"] is True
 
 
+async def test_prepare_outbound_message_normalizes_internal_user_marker_for_group() -> None:
+    async def get_group_members(group_id: str, **kwargs):
+        return []
+
+    text, options = await prepare_outbound_message(
+        "@武杰 (user_id:wujie15) 是同样的分页问题",
+        group_id="11324076",
+        metadata=None,
+        get_group_members=get_group_members,
+    )
+
+    assert text == "@wujie15 是同样的分页问题"
+    assert options.mention_user_ids == "wujie15"
+    assert options.mention_agent_ids == ""
+
+
+async def test_prepare_outbound_message_merges_internal_markers_with_metadata() -> None:
+    async def get_group_members(group_id: str, **kwargs):
+        return []
+
+    text, options = await prepare_outbound_message(
+        "@武杰 (user_id:wujie15) @地图不打烊 (agent_id:17213) 看一下",
+        group_id="11324076",
+        metadata={
+            "mention_user_ids": ["owner", "wujie15"],
+            "mention_agent_ids": ["17212"],
+        },
+        get_group_members=get_group_members,
+    )
+
+    assert text == "@wujie15 @17213 看一下"
+    assert options.mention_user_ids == "owner,wujie15"
+    assert options.mention_agent_ids == "17212,17213"
+
+
+async def test_prepare_outbound_message_strips_non_token_internal_marker_without_mention() -> None:
+    async def get_group_members(group_id: str, **kwargs):
+        return []
+
+    text, options = await prepare_outbound_message(
+        "请@武杰 (user_id:wujie15) 看一下",
+        group_id="11324076",
+        metadata=None,
+        get_group_members=get_group_members,
+    )
+
+    assert text == "请@武杰 看一下"
+    assert options.mention_user_ids == ""
+
+
+async def test_prepare_outbound_message_strips_bare_internal_id_marker() -> None:
+    async def get_group_members(group_id: str, **kwargs):
+        return []
+
+    text, options = await prepare_outbound_message(
+        "武杰 (user_id:wujie15) 是同样的问题",
+        group_id="11324076",
+        metadata=None,
+        get_group_members=get_group_members,
+    )
+
+    assert text == "武杰 是同样的问题"
+    assert options.mention_user_ids == ""
+
+
+async def test_prepare_outbound_message_strips_malformed_internal_id_marker() -> None:
+    text, options = await prepare_outbound_message(
+        "武杰 (user_id: ) 是同样的问题",
+        group_id=None,
+        metadata=None,
+    )
+
+    assert text == "武杰 是同样的问题"
+    assert options.mention_user_ids == ""
+
+
+async def test_prepare_outbound_message_keeps_self_agent_marker_as_plain_name() -> None:
+    members = [
+        GroupMember(uid="6471", name="chengbo5.1", agent_id=6471, is_bot=True),
+    ]
+
+    async def get_group_members(group_id: str, **kwargs):
+        return members
+
+    text, options = await prepare_outbound_message(
+        "@chengbo5.1 (agent_id:6471) 收到",
+        group_id="11324076",
+        metadata=None,
+        get_group_members=get_group_members,
+        bot_agent_id=6471,
+    )
+
+    assert text == "@chengbo5.1 收到"
+    assert options.mention_agent_ids == ""
+
+
+async def test_prepare_outbound_message_strips_internal_marker_for_private() -> None:
+    text, options = await prepare_outbound_message(
+        "请 @武杰 (user_id:wujie15) 看一下",
+        group_id=None,
+        metadata=None,
+    )
+
+    assert text == "请 @武杰 看一下"
+    assert options.mention_user_ids == ""
+    assert options.mention_agent_ids == ""
+
+
 async def test_self_mention_by_name_is_dropped_to_plain_text() -> None:
     """`@<self-bot-name>` should stay as plain text — no rewrite, no agent_ids."""
     members = [
