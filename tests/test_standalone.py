@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from pathlib import Path
+from types import SimpleNamespace
 
 from hermes_infoflow import outbound as outbound_mod
 from hermes_infoflow import serverapi as serverapi_mod
 from hermes_infoflow import settings as settings_mod
+from hermes_infoflow import standalone as standalone_mod
 from hermes_infoflow.itypes import SendOptions, SentResult
 from hermes_infoflow.standalone import standalone_send
 
@@ -54,6 +57,16 @@ def test_standalone_media_only_image_dm(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(settings_mod, "_read_account_settings", lambda pconfig: _settings(tmp_path))
     monkeypatch.setattr(serverapi_mod, "ServerAPI", FakeServerAPI)
+    monkeypatch.setattr(
+        standalone_mod,
+        "_resolve_safe_local_path",
+        lambda raw: Path(raw),
+    )
+    monkeypatch.setattr(
+        standalone_mod,
+        "prepare_infoflow_image_bytes",
+        lambda raw: SimpleNamespace(data=raw),
+    )
 
     result = asyncio.run(
         standalone_send(None, "alice", "", media_files=[(str(image_path), False)])
@@ -101,6 +114,16 @@ def test_standalone_text_and_image_group(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings_mod, "_read_account_settings", lambda pconfig: _settings(tmp_path))
     monkeypatch.setattr(serverapi_mod, "ServerAPI", FakeServerAPI)
     monkeypatch.setattr(outbound_mod, "prepare_outbound_message", fake_prepare)
+    monkeypatch.setattr(
+        standalone_mod,
+        "_resolve_safe_local_path",
+        lambda raw: Path(raw),
+    )
+    monkeypatch.setattr(
+        standalone_mod,
+        "prepare_infoflow_image_bytes",
+        lambda raw: SimpleNamespace(data=raw),
+    )
 
     result = asyncio.run(
         standalone_send(None, "group:4507088", "hello", media_files=[(str(image_path), False)])
