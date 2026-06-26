@@ -6,8 +6,10 @@ Canonical participant ids are deliberately typed:
 * ``user:<user_id>`` for human accounts
 
 Infoflow ``imid`` / ``robotId`` values are useful for correlation but are not
-stable participant identities for the plugin.  In particular, never emit
-``bot:<imid>`` when a group bot sender cannot be mapped to an ``agent_id``.
+stable participant identities for the plugin.  Degraded bot senders (no known
+``agent_id``) use ``bot:imid:{imid}`` only as a local ``source.user_id``
+placeholder; this key is never emitted by ``sender_key()`` or stored in the
+message store.
 """
 
 from __future__ import annotations
@@ -37,6 +39,20 @@ def bot_key(agent_id: Any) -> str:
     if value.startswith("user:"):
         return ""
     return f"bot:{value}"
+
+
+def imid_key(imid: Any) -> str:
+    """Generate a degraded identity key for bots without a known agent_id.
+
+    Format: ``bot:imid:{imid}`` — distinguishes from proper ``bot:<agent_id>``
+    while still being a valid, parseable identity key.  Used only as a
+    local fallback for ``source.user_id``; never propagated to ``sender_key()``
+    or message store.
+    """
+    value = _clean(imid)
+    if not value:
+        return ""
+    return f"bot:imid:{value}"
 
 
 def user_key(user_id: Any) -> str:
@@ -73,6 +89,7 @@ def raw_id_from_key(value: Any) -> str:
 
 __all__ = [
     "bot_key",
+    "imid_key",
     "is_degraded_id",
     "is_identity_key",
     "private_peer_key",

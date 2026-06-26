@@ -1832,6 +1832,10 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         source_user_id = raw_id_from_key(canonical_sender)
         if not source_user_id and not msg.sender_is_bot:
             source_user_id = msg.sender_id if not (msg.sender_id or "").startswith("IMID:") else ""
+        if not source_user_id and msg.sender_is_bot:
+            _sender_imid = msg.sender_imid or ""
+            if _sender_imid:
+                source_user_id = f"imid:{_sender_imid}"
         _user_display = participant_name or source_user_id or "unknown"
 
         source = self.build_source(
