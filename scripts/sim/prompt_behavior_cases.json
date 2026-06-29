@@ -83,6 +83,18 @@
       "expected": {
         "must_call": ["infoflow_get_message_history", "map_crash_db_check"],
         "max_call_count": {"map_crash_db_check": 1},
+        "must_not_contain": [
+          "@chengbo05",
+          "@成博",
+          "最终由",
+          "负责人确认",
+          "确认为准",
+          "建议 @",
+          "需结合",
+          "综合判断",
+          "供参考",
+          "如需继续"
+        ],
         "final": "answer"
       }
     },
