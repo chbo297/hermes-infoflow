@@ -377,6 +377,13 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+def _first_nonblank(*values: Any) -> Any:
+    for value in values:
+        if str(value or "").strip():
+            return value
+    return ""
+
+
 def _int_or_zero(value: Any) -> int:
     try:
         return int(value)
@@ -387,7 +394,13 @@ def _int_or_zero(value: Any) -> int:
 def _coerce_body_item(raw: dict[str, Any]) -> BodyItem:
     return BodyItem(
         type=_stringify(raw.get("type")),
-        content=_stringify(raw.get("content")),
+        content=_stringify(
+            _first_nonblank(
+                raw.get("content"),
+                raw.get("commandname"),
+                raw.get("commandName"),
+            )
+        ),
         label=_stringify(raw.get("label")),
         name=_stringify(
             raw.get("name")
@@ -545,6 +558,11 @@ def _extract_body_parts(body_items: list[BodyItem]) -> tuple[str, bool, list[str
         t = (item.type or "").upper()
         if t in ("TEXT", "MD"):
             raw_parts.append(item.content)
+        elif t == "COMMAND":
+            command = (item.content or item.name or "").strip()
+            if command:
+                raw_parts.append(f"【命令】{command}")
+            has_structural_body = True
         elif t == "AT":
             has_structural_body = True
         elif t == "LINK":

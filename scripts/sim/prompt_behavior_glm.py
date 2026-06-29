@@ -417,6 +417,15 @@ def _evaluate(
     elif expected_final == "answer":
         if not final_clean or final_clean == "NO_REPLY":
             failures.append(f"expected answer, got {final_clean!r}")
+    for text in expected.get("must_contain") or []:
+        if str(text) not in final_clean:
+            failures.append(f"expected final to contain {text!r}, got {final_clean!r}")
+    for group in expected.get("must_contain_any_groups") or []:
+        if not any(str(item) in final_clean for item in group):
+            failures.append(f"expected final to contain one of {group!r}, got {final_clean!r}")
+    for text in expected.get("must_not_contain") or []:
+        if str(text) in final_clean:
+            failures.append(f"expected final not to contain {text!r}, got {final_clean!r}")
     return failures
 
 

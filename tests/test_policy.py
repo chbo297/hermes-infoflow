@@ -61,6 +61,12 @@ def test_normalize_reply_mode_unknown_falls_back() -> None:
     assert "garbage" in nm.warning
 
 
+def test_watch_mention_prompt_stays_domain_agnostic() -> None:
+    prompt = policy._WATCH_MENTION_PROMPT
+    for term in ("版本", "crash", "Crash", "崩溃", "灰度", "放量", "分级"):
+        assert term not in prompt
+
+
 def test_dm_always_dispatches() -> None:
     p = policy.GroupPolicy(reply_mode="ignore", require_mention=True)
     decision = policy.evaluate_inbound(_dm(), p)

@@ -87,6 +87,63 @@
       }
     },
     {
+      "id": "watch_mention_command_context_public_evidence",
+      "description": "watch_mention should use recent command/topic context and public historical evidence instead of staying silent when the request asks the watched person to decide.",
+      "strategy": "watch_mention",
+      "who": "chengbo05",
+      "content": "@成博 (user_id:chengbo05)  辛苦看下，小版本可以正常分级了么",
+      "message_id": "wm_command_context_mid",
+      "history": [
+        {
+          "time": "2026.06.29 10.30.47",
+          "content": "[Sender: type:'human'; user_id:'huangshuo02'; name:'黄硕'; permission:'restricted']\n[Message: message_id:'wm_command_mid'; created_time:'2026.06.29 10.30.47']\n【命令】iOS分级"
+        },
+        {
+          "time": "2026.06.24 10.38.28",
+          "content": "[Sender: type:'bot'; agent_id:'6471'; name:'chengbo5.1'; permission:'restricted']\n[Message: message_id:'wm_public_evidence_mid'; created_time:'2026.06.24 10.38.28']\n@成博 **21.17.30 vs 线上主力版本 21.17.0 对比**：21.17.30 crash 率约 0.031%，Top crash 全是历史老方法，无新增方法，波动在正常范围内。结论：21.17.30 与主力版本 crash 率基本持平，可继续放量。"
+        },
+        {
+          "time": "2026.06.29 10.31.16",
+          "content": "[Sender: type:'human'; user_id:'huangshuo02'; name:'黄硕'; permission:'restricted']\n[Message: message_id:'wm_command_context_mid'; created_time:'2026.06.29 10.31.16']\n@成博 辛苦看下，小版本可以正常分级了么"
+        }
+      ],
+      "map_result": {
+        "version": "21.17.30",
+        "has_data": true,
+        "summary": "21.17.30 当前 crash 率 0.0214%，与主力版本 0.0196% 基本持平；Top crash 均为历史老方法，无新增集中风险。",
+        "risk": "low"
+      },
+      "expected": {
+        "must_call": ["infoflow_get_message_history"],
+        "max_call_count": {"map_crash_db_check": 1},
+        "must_contain_any_groups": [
+          ["21.17.30"],
+          ["0.031%", "0.0214%", "0.0196%"],
+          ["历史老方法", "无新增方法", "无新增集中风险"]
+        ],
+        "must_not_contain": [
+          "最终由",
+          "负责人确认",
+          "确认为准",
+          "以 chengbo05",
+          "还需 @",
+          "需 @",
+          "还需 chengbo05",
+          "需 chengbo05",
+          "请 @",
+          "综合其他维度确认",
+          "流程是否正常推进需",
+          "需结合",
+          "综合判断",
+          "建议结合最新数据",
+          "如需继续判断",
+          "可作为当前判断参考",
+          "供参考"
+        ],
+        "final": "answer"
+      }
+    },
+    {
       "id": "watch_mention_owner_decision",
       "description": "watch_mention with only a request for the mentioned person to decide should not invent a skill answer.",
       "strategy": "watch_mention",
@@ -172,6 +229,7 @@
       },
       "expected": {
         "must_call": ["infoflow_get_message_history"],
+        "must_not_call": ["map_crash_db_check"],
         "final": "NO_REPLY"
       }
     }

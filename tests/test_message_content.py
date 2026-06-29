@@ -22,6 +22,13 @@ class _Face:
 
 
 @dataclass
+class _Command:
+    type: str = "command"
+    content: str = ""
+    name: str = ""
+
+
+@dataclass
 class _Msg:
     message_id: str = "msg-1"
     body_for_agent: str = ""
@@ -88,6 +95,16 @@ def test_render_reply_body_item_separates_following_text() -> None:
         render_message_content(msg)
         == "<Quote message_id:'1'; sender:'bot:6471'>old</Quote>\nthanks!"
     )
+
+
+def test_render_command_body_item_as_context() -> None:
+    msg = _Msg(body_items=[_Command(content="iOS分级")])
+    assert render_message_content(msg) == "【命令】iOS分级"
+
+
+def test_render_command_body_item_falls_back_to_name() -> None:
+    msg = _Msg(body_items=[_Command(content=" ", name="iOS分级")])
+    assert render_message_content(msg) == "【命令】iOS分级"
 
 
 def test_render_reply_body_item_uses_enriched_reply_target_sender() -> None:

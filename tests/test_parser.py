@@ -420,6 +420,36 @@ def test_group_message_extracts_mention_and_msgseqid(account):
     assert inbound.image_urls == ["https://media.infoflow/img.jpg"]
 
 
+def test_group_command_message_is_recordable_context(account):
+    acct, raw_key = account
+    payload = {
+        "message": {
+            "header": {
+                "fromuserid": "bob",
+                "groupid": 123456,
+                "messageid": "command-context",
+            },
+            "body": [
+                {"type": "command", "content": " ", "commandname": "iOS分级"},
+                {"type": "TEXT", "content": " "},
+            ],
+        }
+    }
+    ct = aes_ecb_encrypt_b64url(json.dumps(payload, ensure_ascii=False), raw_key)
+
+    res = parser.parse_webhook(
+        content_type="text/plain",
+        raw_body=ct,
+        account=acct,
+    )
+
+    assert res.kind == "message"
+    inbound = res.inbound
+    assert inbound.text == "【命令】iOS分级"
+    assert inbound.body_items[0].type == "command"
+    assert inbound.body_items[0].content == "iOS分级"
+
+
 def test_group_at_face_message_is_not_at_only(account):
     acct, raw_key = account
     payload = {

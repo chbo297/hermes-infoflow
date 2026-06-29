@@ -197,6 +197,10 @@ def _render_body_items(
         item_type = _first_attr(item, "type").upper()
         if item_type in {"TEXT", "MD"}:
             parts.append(_first_attr(item, "content"))
+        elif item_type == "COMMAND":
+            command = _first_attr(item, "content").strip() or _first_attr(item, "name").strip()
+            if command:
+                parts.append(f"【命令】{command}")
         elif item_type == "AT":
             parts.append(_format_at(item, robot_agent_id_lookup) + " ")
         elif item_type == "LINK":
