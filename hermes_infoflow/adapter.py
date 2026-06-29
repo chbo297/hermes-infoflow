@@ -2084,7 +2084,9 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         if raw_message.get("infoflow_unread_message_context_applied"):
             return
 
-        session_boundary_line = await self._maybe_apply_idle_session_reset(event)
+        session_boundary_line = await self._maybe_apply_watch_mention_stale_session_reset(event)
+        if not session_boundary_line:
+            session_boundary_line = await self._maybe_apply_idle_session_reset(event)
         unread_context = self._unread_message_context_for_event(event)
         count = unread_context.history_before_count
         raw_message["infoflow_unread_message_context_count"] = count
@@ -2250,7 +2252,12 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 evict(session_key)
 
     @staticmethod
-    def _clear_gateway_session_state(gateway: Any, session_key: str) -> None:
+    def _clear_gateway_session_state(
+        gateway: Any,
+        session_key: str,
+        *,
+        reason: str = "infoflow_idle_reset",
+    ) -> None:
         model_overrides = getattr(gateway, "_session_model_overrides", None)
         if isinstance(model_overrides, dict):
             model_overrides.pop(session_key, None)
@@ -2268,7 +2275,7 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         invalidate = getattr(gateway, "_invalidate_session_run_generation", None)
         if callable(invalidate):
             with contextlib.suppress(Exception):
-                invalidate(session_key, reason="infoflow_idle_reset")
+                invalidate(session_key, reason=reason)
         queued_events = getattr(gateway, "_queued_events", None)
         if isinstance(queued_events, dict):
             queued_events.pop(session_key, None)
@@ -2338,6 +2345,123 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             "请调用 infoflow_get_message_history，使用当前 Message 标签中的 "
             "message_id 作为锚点查询历史。若当前消息可独立回答，请直接处理。]"
         )
+
+    @staticmethod
+    def _watch_mention_session_boundary_line() -> str:
+        return (
+            "[Session Boundary: 当前 watch_mentions 触发发现同一 LLM session "
+            "里已有旧的 watch_mentions 静默输出，已切换为新的 LLM session。"
+            "之前 Hermes transcript 没有放入当前上下文；如果当前问题依赖之前内容，"
+            "请调用 infoflow_get_message_history，使用当前 Message 标签中的 "
+            "message_id 作为锚点查询历史。]"
+        )
+
+    @staticmethod
+    def _is_watch_mention_trigger(raw_message: dict[str, Any]) -> bool:
+        trigger = str(raw_message.get("trigger_reason") or "")
+        return trigger.startswith("watchMentions:")
+
+    @staticmethod
+    def _transcript_has_stale_watch_mention_silence(history: list[Any]) -> bool:
+        if not history:
+            return False
+        recent = list(history[-30:])
+        for idx, msg in enumerate(recent):
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role") or "") != "assistant":
+                continue
+            if str(msg.get("content") or "").strip() != "NO_REPLY":
+                continue
+            for prev in recent[max(0, idx - 4):idx]:
+                if not isinstance(prev, dict) or str(prev.get("role") or "") != "user":
+                    continue
+                text = str(prev.get("content") or "")
+                if "watch_mentions" in text or "watchMentions:" in text:
+                    return True
+        return False
+
+    async def _maybe_apply_watch_mention_stale_session_reset(self, event: Any) -> str:
+        raw_message = getattr(event, "raw_message", None)
+        if not isinstance(raw_message, dict):
+            return ""
+        if raw_message.get("infoflow_watch_mention_session_reset_applied"):
+            return ""
+        if not self._is_watch_mention_trigger(raw_message):
+            return ""
+
+        gateway = getattr(self, "gateway_runner", None)
+        session_store = getattr(gateway, "session_store", None) if gateway else None
+        if gateway is None or session_store is None:
+            return ""
+
+        session_key = self._resolve_gateway_session_key(event)
+        if not session_key:
+            return ""
+        entry = self._get_session_entry(session_store, session_key)
+        if entry is None:
+            return ""
+        if self._has_running_work(gateway, session_store, session_key):
+            return ""
+
+        old_session_id = str(getattr(entry, "session_id", "") or "")
+        load_transcript = getattr(session_store, "load_transcript", None)
+        if not old_session_id or not callable(load_transcript):
+            return ""
+        try:
+            history = load_transcript(old_session_id)
+        except Exception as exc:
+            gw_log().warning(
+                "[infoflow] watch_mentions stale-session transcript load failed for %s: %s",
+                session_key,
+                exc,
+                exc_info=True,
+            )
+            return ""
+        if not self._transcript_has_stale_watch_mention_silence(history):
+            return ""
+
+        try:
+            self._cleanup_cached_agent(gateway, session_key)
+            reset = getattr(session_store, "reset_session", None)
+            if not callable(reset):
+                return ""
+            new_entry = reset(session_key)
+            if new_entry is None:
+                return ""
+            new_session_id = str(getattr(new_entry, "session_id", "") or "")
+            self._clear_gateway_session_state(
+                gateway,
+                session_key,
+                reason="infoflow_watch_mention_stale_silence",
+            )
+            await self._emit_idle_session_reset_hooks(
+                gateway,
+                getattr(event, "source", None),
+                session_key,
+                old_session_id,
+                new_session_id,
+            )
+        except Exception as exc:
+            gw_log().warning(
+                "[infoflow] watch_mentions stale-session reset failed for %s: %s",
+                session_key,
+                exc,
+                exc_info=True,
+            )
+            return ""
+
+        raw_message["infoflow_watch_mention_session_reset_applied"] = True
+        raw_message["infoflow_watch_mention_session_reset_old_session_id"] = old_session_id
+        raw_message["infoflow_watch_mention_session_reset_new_session_id"] = new_session_id
+        gw_log().info(
+            "[infoflow] watch_mentions stale-session reset applied "
+            "session_key=%s old=%s new=%s",
+            session_key,
+            old_session_id or "-",
+            new_session_id or "-",
+        )
+        return self._watch_mention_session_boundary_line()
 
     async def _maybe_apply_idle_session_reset(self, event: Any) -> str:
         raw_message = getattr(event, "raw_message", None)

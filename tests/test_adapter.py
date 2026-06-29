@@ -308,6 +308,121 @@ def test_idle_session_reset_skips_running_agent(configured_env) -> None:
     assert "infoflow_idle_session_reset_applied" not in event.raw_message
 
 
+def test_watch_mention_stale_silence_reset_rotates_before_unread_context(
+    configured_env,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(ms, "_STATE_BASE_DIR", tmp_path)
+    adapter = InfoflowAdapter(_make_config())
+    base_time = int(__import__("time").time() * 1000)
+    adapter._message_store.persist_group(
+        message_id="M1",
+        group_id="4507088",
+        sender="user:alice",
+        content="公开依据：指标 1，结论可继续",
+        created_time=base_time + 1_000,
+    )
+    adapter._message_store.persist_group(
+        message_id="M2",
+        group_id="4507088",
+        sender="user:alice",
+        content="current",
+        created_time=base_time + 2_000,
+    )
+    source = adapter.build_source(
+        chat_id="group:4507088",
+        chat_name="group:4507088",
+        chat_type="group",
+        user_id="alice",
+        user_name="alice",
+        message_id="M2",
+    )
+    event = MessageEvent(
+        text="[Message: message_id:'M2']\ncurrent",
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message={
+            "infoflow_standard_message": True,
+            "trigger_reason": "watchMentions:chengbo05",
+        },
+        message_id="M2",
+    )
+    session_key = adapter._llm_context_key_for_event(event)
+    old_entry = SimpleNamespace(
+        session_key=session_key,
+        session_id="old-session",
+        updated_at=datetime.now(),
+        origin=source,
+    )
+    gateway = _FakeGateway(session_key, old_entry)
+    gateway.session_store.load_transcript = lambda session_id: [
+        {"role": "user", "content": "[Dispatch] watch_mentions：有人 @ 了 chengbo05"},
+        {"role": "assistant", "content": "", "tool_calls": []},
+        {"role": "tool", "content": "[]"},
+        {"role": "assistant", "content": "NO_REPLY"},
+    ]
+    adapter.gateway_runner = gateway
+
+    asyncio.run(adapter.on_processing_start(event))
+
+    assert gateway.session_store.reset_calls == [session_key]
+    assert gateway.invalidated == [(session_key, "infoflow_watch_mention_stale_silence")]
+    assert event.text.startswith("[Session Boundary: 当前 watch_mentions")
+    assert "\n[Unread Message Context:" in event.text
+    assert event.raw_message["infoflow_watch_mention_session_reset_applied"] is True
+    assert (
+        event.raw_message["infoflow_watch_mention_session_reset_old_session_id"]
+        == "old-session"
+    )
+    assert (
+        event.raw_message["infoflow_watch_mention_session_reset_new_session_id"]
+        == "new-session"
+    )
+    assert event.raw_message["infoflow_unread_message_context_count"] == 1
+
+
+def test_watch_mention_stale_silence_reset_skips_clean_transcript(configured_env) -> None:
+    adapter = InfoflowAdapter(_make_config())
+    source = adapter.build_source(
+        chat_id="group:4507088",
+        chat_name="group:4507088",
+        chat_type="group",
+        user_id="alice",
+        user_name="alice",
+        message_id="M1",
+    )
+    event = MessageEvent(
+        text="[Message: message_id:'M1']\ncurrent",
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message={
+            "infoflow_standard_message": True,
+            "trigger_reason": "watchMentions:chengbo05",
+        },
+        message_id="M1",
+    )
+    session_key = adapter._llm_context_key_for_event(event)
+    old_entry = SimpleNamespace(
+        session_key=session_key,
+        session_id="old-session",
+        updated_at=datetime.now(),
+        origin=source,
+    )
+    gateway = _FakeGateway(session_key, old_entry)
+    gateway.session_store.load_transcript = lambda session_id: [
+        {"role": "user", "content": "[Dispatch] watch_mentions：有人 @ 了 chengbo05"},
+        {"role": "assistant", "content": "已有公开依据：1"},
+    ]
+    adapter.gateway_runner = gateway
+
+    asyncio.run(adapter.on_processing_start(event))
+
+    assert gateway.session_store.reset_calls == []
+    assert "Session Boundary" not in event.text
+    assert "infoflow_watch_mention_session_reset_applied" not in event.raw_message
+
+
 def test_idle_session_reset_ignores_command_fast_path(configured_env) -> None:
     cfg = _make_config()
     cfg.extra = {"idle_session_reset_seconds": 1}
