@@ -67,6 +67,13 @@ def test_watch_mention_prompt_stays_domain_agnostic() -> None:
         assert term not in prompt
 
 
+def test_watch_mention_prompt_ignores_stale_silence_examples() -> None:
+    prompt = policy._WATCH_MENTION_PROMPT
+    assert "本轮独立判断" in prompt
+    assert "旧的 assistant 回复" in prompt
+    assert "旧策略不是示例" in prompt
+
+
 def test_dm_always_dispatches() -> None:
     p = policy.GroupPolicy(reply_mode="ignore", require_mention=True)
     decision = policy.evaluate_inbound(_dm(), p)
