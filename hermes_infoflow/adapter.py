@@ -1071,7 +1071,12 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
                 missing.append(label)
         return missing
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
+        # Hermes Agent 0.19 forwards this context to every platform adapter.
+        # Infoflow has no cold-start queue to discard, so both paths share the
+        # same connection flow; accepting the keyword keeps the adapter
+        # compatible with the current BasePlatformAdapter contract.
+        del is_reconnect
         mode = str(self._settings.get("connection_mode") or "webhook").strip().lower()
         if mode not in {"webhook", "websocket"}:
             self._set_fatal_error(

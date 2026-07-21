@@ -3290,7 +3290,7 @@ def test_group_compression_status_is_suppressed_without_admin_redirect(
     )
 
 
-def test_connect_does_not_schedule_plugin_gateway_started_notice(
+def test_connect_accepts_reconnect_context_without_scheduling_started_notice(
     configured_env, monkeypatch
 ) -> None:
     monkeypatch.setenv("INFOFLOW_ADMIN_USER", "admin01")
@@ -3302,7 +3302,7 @@ def test_connect_does_not_schedule_plugin_gateway_started_notice(
 
     async def _go():
         try:
-            result = await adapter.connect()
+            result = await adapter.connect(is_reconnect=True)
             assert result is True
             assert len(adapter._background_tasks) == 0
             return result
