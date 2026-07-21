@@ -326,7 +326,12 @@ async def publish_file(
         or record.size_bytes != shared_size
         or not record.object_key
     )
+    if not needs_upload and record is not None:
+        # The upload API may canonicalize or replace the requested key. Reuse
+        # the exact key persisted from its response on later URL refreshes.
+        object_key = record.object_key
     e_tag = record.e_tag if record is not None else ""
+    last_upload_at = record.last_upload_at if record is not None else 0
     if needs_upload:
         upload = await serverapi.bos_upload(
             file_content=shared_path.read_bytes(),
@@ -338,6 +343,25 @@ async def publish_file(
             raise FileDeliveryError(str(getattr(upload, "error", "") or "BOS upload failed"))
         object_key = str(getattr(upload, "object_key", "") or object_key)
         e_tag = str(getattr(upload, "e_tag", "") or "")
+        last_upload_at = now_i
+
+        # Persist the successful upload before getUrl/probing. If URL
+        # verification later fails, the next attempt can reuse this exact BOS
+        # object instead of uploading the same bytes again. An empty URL keeps
+        # this provisional record from being returned as a valid cache hit.
+        _db_upsert(
+            account_slug=account_slug,
+            out_path=out_path,
+            shared_path=str(shared_path),
+            object_key=object_key,
+            url="",
+            md5=shared_md5,
+            e_tag=e_tag,
+            size_bytes=shared_size,
+            url_expires_at=0,
+            now=now_i,
+            last_upload_at=last_upload_at,
+        )
 
     expiration_seconds = _expiration_for_shared_path(shared_path)
     get_url = await _get_url_with_retry(
@@ -364,7 +388,7 @@ async def publish_file(
         size_bytes=shared_size,
         url_expires_at=expires_at,
         now=now_i,
-        last_upload_at=now_i if needs_upload else (record.last_upload_at if record else 0),
+        last_upload_at=last_upload_at,
     )
     return PublishedSharedFile(
         url=url,
@@ -556,18 +580,62 @@ async def _get_url_with_retry(
 
 
 async def _verify_published_url(url: str, *, session: Any | None) -> None:
-    """Verify a freshly issued URL points to an existing BOS object."""
-    probe = await _api.im_bos_head_url(
+    """Verify that a freshly issued BOS URL can actually be read with GET."""
+    head_probe = await _api.im_bos_head_url(
         url,
         session=session,
         timeout=HEAD_PROBE_TIMEOUT_SECONDS,
     )
-    if getattr(probe, "ok", False):
+    _log_bos_url_probe("HEAD", url, head_probe)
+    if getattr(head_probe, "ok", False):
         return
+
+    # Infoflow/BCE BOS getUrl currently issues a URL that is authorized for
+    # GET. New private objects can therefore return 403 to HEAD while the same
+    # signed URL remains fully readable. Probe one byte before declaring the
+    # published URL unavailable.
+    range_probe = await _api.im_bos_range_probe_url(
+        url,
+        byte_start=0,
+        byte_end=0,
+        session=session,
+        timeout=HEAD_PROBE_TIMEOUT_SECONDS,
+    )
+    _log_bos_url_probe("GET_RANGE", url, range_probe)
+    if getattr(range_probe, "ok", False):
+        return
+
+    head_detail = _bos_probe_error_detail(head_probe, fallback="HEAD probe failed")
+    range_detail = _bos_probe_error_detail(
+        range_probe,
+        fallback="Range GET probe failed",
+    )
+    raise FileDeliveryError(
+        "published URL is not reachable: "
+        f"HEAD {head_detail}; Range GET {range_detail}"
+    )
+
+
+def _bos_probe_error_detail(probe: Any, *, fallback: str) -> str:
     status = int(getattr(probe, "status", 0) or 0)
-    error = str(getattr(probe, "error", "") or "")
-    detail = f"HTTP {status}" if status else (error or "HEAD probe failed")
-    raise FileDeliveryError(f"published URL is not reachable: {detail}")
+    if status:
+        return f"HTTP {status}"
+    return str(getattr(probe, "error", "") or fallback)
+
+
+def _log_bos_url_probe(method: str, url: str, probe: Any) -> None:
+    """Log probe evidence, including the operator-approved signed URL."""
+    audit_logger = _api.gw_log()
+    audit_logger.info(
+        "[infoflow:file_to_url] BOS URL probe method=%s ok=%s status=%s "
+        "x-bce-request-id=%s error=%s signed_url=%s",
+        method,
+        bool(getattr(probe, "ok", False)),
+        int(getattr(probe, "status", 0) or 0),
+        str(getattr(probe, "request_id", "") or "-"),
+        str(getattr(probe, "error", "") or "-"),
+        url,
+    )
 
 
 def _sanitize_object_component(value: str) -> str:

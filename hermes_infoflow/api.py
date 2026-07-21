@@ -246,6 +246,7 @@ class BosUrlProbeResult:
     accept_ranges: str = ""
     content_range: str = ""
     e_tag: str = ""
+    request_id: str = ""
     body_prefix: str = ""
     error: str = ""
 
@@ -594,6 +595,7 @@ def _bos_url_probe_result_from_response(
         accept_ranges=str(resp.headers.get("Accept-Ranges", "")),
         content_range=str(resp.headers.get("Content-Range", "")),
         e_tag=str(resp.headers.get("ETag", "")),
+        request_id=str(resp.headers.get("x-bce-request-id", "")),
         body_prefix=body_prefix,
     )
 
@@ -652,11 +654,15 @@ async def im_bos_range_probe_url(
                 headers={"Range": f"bytes={start}-{end}"},
                 timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
-                body = await resp.read()
+                # Read only a small prefix even when a backend ignores Range
+                # and responds 200 with the complete object.
+                body = await resp.content.read(200)
                 return _bos_url_probe_result_from_response(
                     resp,
-                    ok_statuses={206},
-                    body_prefix=body[:200].decode("utf-8", "replace"),
+                    # Some object stores ignore Range and return the complete
+                    # object with 200. Both statuses prove GET readability.
+                    ok_statuses={200, 206},
+                    body_prefix=body.decode("utf-8", "replace"),
                 )
     except (asyncio.TimeoutError, TimeoutError):
         return BosUrlProbeResult(

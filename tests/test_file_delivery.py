@@ -255,7 +255,7 @@ def test_get_url_retries_before_success(monkeypatch, tmp_path: Path) -> None:
     assert len(serverapi.get_url_calls) == 3
 
 
-def test_publish_fails_when_head_probe_fails_and_does_not_cache(
+def test_publish_fails_when_probes_fail_but_reuses_uploaded_object(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -267,7 +267,11 @@ def test_publish_fails_when_head_probe_fails_and_does_not_cache(
     async def fake_head_url(_url, **_kwargs):
         return api.BosUrlProbeResult(False, status=404)
 
+    async def fake_range_url(_url, **_kwargs):
+        return api.BosUrlProbeResult(False, status=404)
+
     monkeypatch.setattr(api, "im_bos_head_url", fake_head_url)
+    monkeypatch.setattr(api, "im_bos_range_probe_url", fake_range_url)
 
     with pytest.raises(FileDeliveryError, match="published URL is not reachable"):
         _run(publish_file(
@@ -287,7 +291,7 @@ def test_publish_fails_when_head_probe_fails_and_does_not_cache(
     ))
 
     assert published.url == "https://download.example.com/2"
-    assert len(serverapi.upload_calls) == 2
+    assert len(serverapi.upload_calls) == 1
     assert len(serverapi.get_url_calls) == 2
 
 

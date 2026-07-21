@@ -477,21 +477,33 @@ def test_im_bos_head_url_maps_headers() -> None:
     assert captured["timeout"].total == 3
 
 
-def test_im_bos_range_probe_url_maps_partial_response() -> None:
+@pytest.mark.parametrize(
+    ("response_status", "content_range"),
+    [(206, "bytes 0-0/49"), (200, "")],
+)
+def test_im_bos_range_probe_url_accepts_partial_or_full_response(
+    response_status: int,
+    content_range: str,
+) -> None:
     captured: dict[str, Any] = {}
 
+    class _Content:
+        async def read(self, limit):
+            captured["read_limit"] = limit
+            return b"I"
+
     class _Resp:
-        status = 206
+        status = response_status
         headers = {
             "Content-Type": "text/plain",
             "Content-Length": "1",
             "Accept-Ranges": "bytes",
-            "Content-Range": "bytes 0-0/49",
+            "Content-Range": content_range,
         }
+        content = _Content()
 
         async def __aenter__(self): return self
         async def __aexit__(self, *_): return None
-        async def read(self): return b"I"
 
     class _Sess:
         async def __aenter__(self): return self
@@ -513,15 +525,16 @@ def test_im_bos_range_probe_url_maps_partial_response() -> None:
 
     assert result == api.BosUrlProbeResult(
         ok=True,
-        status=206,
+        status=response_status,
         content_type="text/plain",
         content_length="1",
         accept_ranges="bytes",
-        content_range="bytes 0-0/49",
+        content_range=content_range,
         body_prefix="I",
     )
     assert captured["headers"] == {"Range": "bytes=0-0"}
     assert captured["timeout"].total == 4
+    assert captured["read_limit"] == 200
 
 
 def test_im_bos_upload_reports_http_error(monkeypatch) -> None:

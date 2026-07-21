@@ -13,7 +13,7 @@
 - 必要时把外部文件导入可分享目录。
 - 上传文件到 Infoflow BOS。
 - 调用 getUrl 获取可访问 URL。
-- 对新获取的 URL 执行 HEAD 校验，确认对象可访问。
+- 对新获取的 URL 先执行 HEAD；失败时用 1 字节 Range GET 确认可读。
 - 缓存 URL 和文件指纹。
 
 `file_delivery` 不负责：
@@ -231,7 +231,11 @@ BOS getUrl 支持 `expirationSeconds`。当前内部策略：
 
 URL 快过期时，`file_delivery` 会重新 getUrl。
 
-由于 getUrl 实测不会校验 `object_key` 是否真实存在，`file_delivery` 在新上传或刷新 URL 后会额外执行一次 HEAD 校验。只有 HEAD 返回可访问时才写入缓存；如果 HEAD 返回 404 或其它失败，发布会失败，避免返回实际不可下载的 URL。
+由于 getUrl 实测不会校验 `object_key` 是否真实存在，`file_delivery` 在新上传或刷新 URL 后会额外执行可读性校验。先尝试 HEAD；如果签名只授权 GET 而返回 403/405，或 HEAD 因其它原因失败，则回退 `GET Range: bytes=0-0`。Range 返回 206（或服务忽略 Range 后返回 200）即表示 URL 可用；两种探测都失败时发布才失败。
+
+上传成功后会先暂存 `object_key`、ETag 和文件指纹，并保持 URL 为空。这样即使 getUrl 或可读性校验失败，下次重试也会复用已经上传的对象，不会重复上传。URL 校验成功后再补齐 URL 与过期时间。
+
+探测日志在 INFO 级别记录 HEAD/Range 的状态、`x-bce-request-id` 和完整的带 `authorization` 签名 URL。签名在过期前具有下载权限，应限制日志访问范围。
 
 ## SQLite 缓存
 
@@ -285,7 +289,7 @@ CREATE TABLE IF NOT EXISTS shared_files (
 - `size_bytes` 相同。
 - `url` 未过期且没有进入刷新窗口。
 
-命中时直接返回缓存 URL。文件变化、URL 过期或缓存缺失时，会重新上传或重新 getUrl，并在写入缓存前进行 HEAD 校验。
+命中时直接返回缓存 URL。文件变化或对象缺失时重新上传；URL 过期时只重新 getUrl。上传元数据先暂存，URL 在 HEAD/Range 校验成功后写入正式缓存。
 
 ## Markdown 使用建议
 

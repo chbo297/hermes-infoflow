@@ -212,7 +212,7 @@ BosGetUrlResult(
 
 含义是：拿到这个 URL 的调用方不需要额外 token，就可以在服务端允许的时间/策略内下载对象。
 
-但当前实测还发现：上传后的对象可以通过公共 URL 直接访问，不带 `authorization` query 也返回 `200`：
+历史实测曾发现：上传后的对象可以通过公共 URL 直接访问，不带 `authorization` query 也返回 `200`：
 
 ```text
 https://bj.bcebos.com/v1/common-archive/<objectKey>
@@ -228,7 +228,8 @@ https://bj.bcebos.com/v1/common-archive/hermes-infoflow/probe/manual-upload/2026
 
 - 保守链路：`upload -> getUrl -> 返回 getUrl 的 URL`。
 - 优化链路：`upload -> build_bos_public_url(object_key)`。
-- 直接公共 URL 是当前环境实测行为，不等同于官方长期稳定承诺；如果 BOS bucket 权限变化，公共 URL 可能失效，而 `getUrl` 仍可能可用。
+- 直接公共 URL 不是稳定契约。2026-07-20 新上传对象已变为私有，裸 URL 返回
+  `403 ObjectAclNotPass`，但 `getUrl` 返回的签名 URL 仍可正常下载。
 
 ## URL 可用性轻量检查
 
@@ -237,11 +238,14 @@ https://bj.bcebos.com/v1/common-archive/hermes-infoflow/probe/manual-upload/2026
 推荐顺序：
 
 1. `HEAD`
-2. 如果需要确认 Range 读取，再用 `GET` + `Range: bytes=0-0`
+2. `HEAD` 非 200 时，必须回退 `GET` + `Range: bytes=0-0`
+
+`getUrl` 返回的签名可能只授权 GET。此时同一 URL 会表现为 `HEAD 403`、
+`GET Range 206`；前者不能单独证明对象不可下载。
 
 ### HEAD 支持
 
-已验证 BOS 公共 URL 支持 `HEAD`：
+历史公共对象支持 `HEAD`：
 
 | 对象 | HTTP 状态 | 关键响应头 |
 |---|---|---|
@@ -284,9 +288,10 @@ Accept-Ranges: bytes
 
 工程建议：
 
-- `file_delivery` 如果只要确认对象存在，用 `HEAD`。
-- 如果必须确认内容可读，用 `Range: bytes=0-0`。
+- `file_delivery` 可以先用 `HEAD` 做快速检查，但失败后必须回退 Range GET。
+- 最终可读性以签名 URL 的 `GET Range: bytes=0-0` 为准；接受 `206`，也接受忽略 Range 后返回的 `200`。
 - 不要完整下载大文件做健康检查。
+- 诊断日志记录请求方法、状态、`x-bce-request-id` 和完整签名 URL。签名在过期前具有下载权限，应限制日志访问范围。
 
 ## objectKey 行为
 
