@@ -22,7 +22,9 @@ from hermes_infoflow import recall as ad
 from hermes_infoflow.adapter import (
     _apply_automatic_reply_policy,
     _format_group_status_ops_notice,
+    _format_provider_failure_ops_notice,
     _group_status_redirect_kind,
+    _provider_failure_redirect_kind,
 )
 from hermes_infoflow.recall import (
     _InboundContext,
@@ -904,6 +906,54 @@ def test_parse_infoflow_target_thread_always_none() -> None:
 # ---------------------------------------------------------------------------
 # Group status suppression helpers
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "❌ Provider returned an empty response stream after 3 attempts. "
+            "The provider may be experiencing issues — try again in a moment.",
+            "❌ Provider returned an empty response stream",
+        ),
+        (
+            "❌ Provider returned malformed streaming data after 3 attempts. "
+            "The provider may be experiencing issues — try again in a moment.",
+            "❌ Provider returned malformed streaming data",
+        ),
+        (
+            "❌ Connection to provider failed after 3 attempts. "
+            "The provider may be experiencing issues — try again in a moment.",
+            "❌ Connection to provider failed after",
+        ),
+    ],
+)
+def test_provider_failure_redirect_kind_matches_exhausted_provider_replies(
+    text: str,
+    expected: str,
+) -> None:
+    assert _provider_failure_redirect_kind(text) == expected
+
+
+def test_provider_failure_redirect_kind_requires_status_at_start() -> None:
+    assert (
+        _provider_failure_redirect_kind(
+            "用户反馈看到“❌ Provider returned an empty response stream”报错。"
+        )
+        == ""
+    )
+
+
+def test_format_provider_failure_ops_notice_identifies_source_and_inbound_message() -> None:
+    notice = _format_provider_failure_ops_notice(
+        source_chat_id="alice",
+        inbound_mid="IN-1",
+        content="❌ Provider returned an empty response stream after 3 attempts.",
+        failure_kind="❌ Provider returned an empty response stream",
+    )
+    assert "来源会话：alice" in notice
+    assert "入站消息：IN-1" in notice
+    assert "empty response stream" in notice
 
 
 @pytest.mark.parametrize(

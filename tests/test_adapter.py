@@ -2811,6 +2811,177 @@ def test_send_records_bot_reply_for_follow_up(configured_env, monkeypatch) -> No
 
 
 @pytest.mark.parametrize(
+    ("chat_id", "source_label"),
+    [
+        ("group:42", "group:42"),
+        ("alice", "alice"),
+    ],
+)
+def test_provider_empty_stream_reply_is_suppressed_and_forwarded_to_ops(
+    configured_env,
+    monkeypatch,
+    chat_id,
+    source_label,
+) -> None:
+    monkeypatch.setenv("INFOFLOW_OP_CHANNEL", "ops01")
+    adapter = InfoflowAdapter(_make_config())
+    adapter._bot.send_message = AsyncMock(
+        return_value=SentResult(success=True, message_id="OP-1")
+    )
+    adapter._push_infoflow_event = MagicMock()
+    content = (
+        "❌ Provider returned an empty response stream after 3 attempts. "
+        "The provider may be experiencing issues — try again in a moment."
+    )
+
+    async def _go():
+        token = _inbound_mid.set("IN-1")
+        try:
+            return (
+                await adapter.send(chat_id, content),
+                await adapter.send(chat_id, content),
+            )
+        finally:
+            _inbound_mid.reset(token)
+
+    first_result, duplicate_result = asyncio.run(_go())
+
+    assert first_result.success is True
+    assert duplicate_result.success is True
+    adapter._bot.send_message.assert_awaited_once()
+    op_kwargs = adapter._bot.send_message.await_args.kwargs
+    assert op_kwargs["group_id"] is None
+    assert op_kwargs["dm_user_id"] == "ops01"
+    assert source_label in op_kwargs["text"]
+    assert "入站消息：IN-1" in op_kwargs["text"]
+    assert content in op_kwargs["text"]
+
+    pushed = [call.kwargs for call in adapter._push_infoflow_event.call_args_list]
+    assert any(
+        item["chat_id"] == chat_id
+        and item["extra"]["suppressed_provider_failure"] is True
+        and item["extra"]["redirected_to_ops"] is True
+        and item["extra"]["provider_failure_kind"]
+        == "❌ Provider returned an empty response stream"
+        for item in pushed
+    )
+    assert any(
+        item["chat_id"] == chat_id
+        and item["extra"]["suppressed_provider_failure"] is True
+        and item["extra"]["redirected_to_ops"] is False
+        and item["extra"]["deduplicated_ops_notice"] is True
+        for item in pushed
+    )
+
+
+def test_provider_empty_stream_reply_is_suppressed_without_ops_channel(
+    configured_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("INFOFLOW_OP_CHANNEL", raising=False)
+    monkeypatch.delenv("INFOFLOW_HOME_CHANNEL", raising=False)
+    adapter = InfoflowAdapter(_make_config())
+    adapter._bot.send_message = AsyncMock()
+    adapter._push_infoflow_event = MagicMock()
+    content = "❌ Provider returned an empty response stream after 3 attempts."
+
+    result = asyncio.run(adapter.send("alice", content))
+
+    assert result.success is True
+    adapter._bot.send_message.assert_not_awaited()
+    pushed = [call.kwargs for call in adapter._push_infoflow_event.call_args_list]
+    assert any(
+        item["chat_id"] == "alice"
+        and item["extra"]["suppressed_provider_failure"] is True
+        and item["extra"]["redirected_to_ops"] is False
+        for item in pushed
+    )
+
+
+def test_provider_error_text_inside_normal_reply_is_not_suppressed(
+    configured_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("INFOFLOW_OP_CHANNEL", "ops01")
+    adapter = InfoflowAdapter(_make_config())
+    adapter._bot.send_message = AsyncMock(
+        return_value=SentResult(success=True, message_id="DM-1")
+    )
+    adapter._push_infoflow_event = MagicMock()
+    content = "用户反馈看到“❌ Provider returned an empty response stream”报错。"
+
+    result = asyncio.run(adapter.send("alice", content))
+
+    assert result.success is True
+    adapter._bot.send_message.assert_awaited_once()
+    kwargs = adapter._bot.send_message.await_args.kwargs
+    assert kwargs["dm_user_id"] == "alice"
+    assert kwargs["text"] == content
+
+
+def test_provider_failure_ops_error_does_not_fall_back_to_source_chat(
+    configured_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("INFOFLOW_OP_CHANNEL", "ops01")
+    adapter = InfoflowAdapter(_make_config())
+    adapter._bot.send_message = AsyncMock(side_effect=RuntimeError("ops unavailable"))
+    adapter._push_infoflow_event = MagicMock()
+    content = "❌ Connection to provider failed after 3 attempts."
+
+    async def _go():
+        token = _inbound_mid.set("IN-2")
+        try:
+            return await adapter.send("group:42", content)
+        finally:
+            _inbound_mid.reset(token)
+
+    result = asyncio.run(_go())
+
+    assert result.success is True
+    adapter._bot.send_message.assert_awaited_once()
+    kwargs = adapter._bot.send_message.await_args.kwargs
+    assert kwargs["group_id"] is None
+    assert kwargs["dm_user_id"] == "ops01"
+    pushed = [call.kwargs for call in adapter._push_infoflow_event.call_args_list]
+    assert any(
+        item["chat_id"] == "group:42"
+        and item["extra"]["suppressed_provider_failure"] is True
+        and item["extra"]["redirected_to_ops"] is False
+        for item in pushed
+    )
+
+
+def test_provider_failure_dedup_keeps_distinct_kinds_for_same_inbound(
+    configured_env,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("INFOFLOW_OP_CHANNEL", "ops01")
+    adapter = InfoflowAdapter(_make_config())
+    adapter._bot.send_message = AsyncMock(
+        return_value=SentResult(success=True, message_id="OP-1")
+    )
+
+    async def _go():
+        token = _inbound_mid.set("IN-3")
+        try:
+            await adapter.send(
+                "alice",
+                "❌ Provider returned an empty response stream after 3 attempts.",
+            )
+            await adapter.send(
+                "alice",
+                "❌ Connection to provider failed after 3 attempts.",
+            )
+        finally:
+            _inbound_mid.reset(token)
+
+    asyncio.run(_go())
+
+    assert adapter._bot.send_message.await_count == 2
+
+
+@pytest.mark.parametrize(
     "content",
     [
         "⏳ Still working... (15 min elapsed — iteration 6/90, waiting for provider response (streaming))",

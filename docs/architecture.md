@@ -164,7 +164,21 @@
 - 每轮 tool call 的结果追加到 messages 数组
 - 最终获取文本响应
 
-### Step 10：NO_REPLY 判定
+### Step 10：Provider 终止错误过滤
+
+**文件**：`adapter.py` `InfoflowAdapter.send()`
+
+- 对群聊和私聊统一识别 Hermes 在流式请求重试耗尽后生成的终止错误：
+  - `❌ Provider returned an empty response stream ...`
+  - `❌ Provider returned malformed streaming data ...`
+  - `❌ Connection to provider failed after ...`
+- 命中后不向原会话发送，始终以成功的空发送结果结束，避免错误详情打扰用户
+- 如果配置了 `INFOFLOW_OP_CHANNEL`，将原错误、来源会话、入站消息 ID 和错误类型转发到运维通道
+- 同一来源会话、同一入站消息在 5 分钟内重复产生的同类终止错误，只向运维通道告警一次；不同故障类型仍分别告警
+- 如果未配置运维通道或转发失败，仍保持原会话静默，并在日志和 SessionTracker 出站事件中记录结果
+- 仅匹配回复开头的终止错误前缀；正常回答中间引用相同报错文字不会被过滤
+
+### Step 11：NO_REPLY 判定
 
 **文件**：`bot.py` `no_reply_sentinel_hits()`
 
@@ -176,7 +190,7 @@
 - 如果命中且除边缘 `NO_REPLY` 外仍有正文，转发诊断到 `INFOFLOW_OP_CHANNEL`
 - **日志**：在 `[iflow:send]` 前判断
 
-### Step 11：消息发送
+### Step 12：消息发送
 
 **文件**：`bot.py` → `api.py` → 如流 HTTP API
 
@@ -185,7 +199,7 @@
 3. 发送 HTTP POST 请求
 4. **日志**：`[iflow:send]` — mid, target, chars, success
 
-### Step 12：状态回写
+### Step 13：状态回写
 
 **文件**：`bot.py`
 
@@ -229,3 +243,4 @@
 | API 发送失败 | 记录错误，不重试 | `[iflow:send] success=False` |
 | Channel prompt 拼接异常 | 跳过注入 | adapter.py try/except |
 | Gateway 路由异常 | 记录错误，丢弃消息 | `gateway.run.py` error |
+| Provider 流式重试耗尽 | 原会话静默，诊断转发 `INFOFLOW_OP_CHANNEL` | `[iflow:send] ... suppressed provider failure` |

@@ -44,6 +44,12 @@ from urllib.parse import urljoin as _urljoin
 from urllib.parse import urlparse as _urlparse
 
 _PROGRESS_LINE_RE = re.compile(r"^[┊\s]*[🔍⚙️💻🌐📁📝🧠✨]")
+_PROVIDER_FAILURE_REDIRECT_PREFIXES = (
+    "❌ Provider returned an empty response stream",
+    "❌ Provider returned malformed streaming data",
+    "❌ Connection to provider failed after",
+)
+_PROVIDER_FAILURE_NOTICE_TTL_SECONDS = 300.0
 _GROUP_STATUS_REDIRECT_PREFIXES = (
     "⏳ Still working",
     "⚡ Interrupting current task",
@@ -251,6 +257,15 @@ def _looks_like_progress_line(text: str) -> bool:
     return bool(_PROGRESS_LINE_RE.match(t)) or "┊" in t[:20]
 
 
+def _provider_failure_redirect_kind(text: str) -> str:
+    """Classify terminal provider transport failures that must stay out of chat."""
+    t = (text or "").lstrip()
+    for prefix in _PROVIDER_FAILURE_REDIRECT_PREFIXES:
+        if t.startswith(prefix):
+            return prefix
+    return ""
+
+
 def _group_status_redirect_kind(text: str) -> str:
     t = (text or "").lstrip()
     for prefix in _GROUP_STATUS_REDIRECT_PREFIXES:
@@ -343,6 +358,22 @@ def _format_group_status_ops_notice(
         "Infoflow 群聊状态消息已拦截\n"
         f"群：group:{group_id}\n"
         f"类型：{status_kind}\n\n"
+        f"{content}"
+    )
+
+
+def _format_provider_failure_ops_notice(
+    *,
+    source_chat_id: str,
+    inbound_mid: str,
+    content: str,
+    failure_kind: str,
+) -> str:
+    return (
+        "Infoflow Provider 异常回复已拦截\n"
+        f"来源会话：{source_chat_id or '-'}\n"
+        f"入站消息：{inbound_mid or '-'}\n"
+        f"类型：{failure_kind}\n\n"
         f"{content}"
     )
 
@@ -641,6 +672,7 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         self._admin_users = infoflow_admin_users_from_env()
         self._admin_uid = ",".join(self._admin_users)
         self._op_channel = infoflow_op_channel_from_env()
+        self._provider_failure_notice_times: dict[tuple[str, str], float] = {}
 
         # ── ServerAPI (Infoflow service layer) ─────────────────────────
         self._serverapi = ServerAPI(settings=self._settings)
@@ -2630,6 +2662,51 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         kind, group_id, dm_user = self._parse_target(chat_id)
         inbound_mid = self._current_inbound_mid()
 
+        provider_failure_kind = _provider_failure_redirect_kind(content)
+        if provider_failure_kind:
+            deduplicated_ops_notice = not self._claim_provider_failure_ops_notice(
+                source_chat_id=chat_id,
+                inbound_mid=inbound_mid,
+                content=content,
+                failure_kind=provider_failure_kind,
+            )
+            redirected = False
+            if not deduplicated_ops_notice:
+                redirected = await self._broadcast_provider_failure_to_ops(
+                    source_chat_id=chat_id,
+                    inbound_mid=inbound_mid,
+                    content=content,
+                    failure_kind=provider_failure_kind,
+                    session=session,
+                )
+            gw_log().warning(
+                "[iflow:send] mid=%s suppressed provider failure target=%s "
+                "kind=%s redirected_ops=%s deduplicated_ops=%s",
+                inbound_mid,
+                chat_id,
+                provider_failure_kind,
+                redirected,
+                deduplicated_ops_notice,
+            )
+            self._push_infoflow_event(
+                None,
+                kind="outbound.infoflow",
+                chat_id=chat_id,
+                extra={
+                    "type": "text",
+                    "chars": len(content or ""),
+                    "success": True,
+                    "message_id": "",
+                    "error": "",
+                    "suppressed_provider_failure": True,
+                    "provider_failure_kind": provider_failure_kind,
+                    "redirected_to_ops": redirected,
+                    "deduplicated_ops_notice": deduplicated_ops_notice,
+                    "preview": (content or "")[:200],
+                },
+            )
+            return SendResult(success=True)
+
         if self._recall_silence_tracker().consume_if_suppress(
             inbound_mid=inbound_mid,
             chat_id=chat_id,
@@ -2845,6 +2922,70 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             },
             log_context=f"group status notice group={group_id}",
         )
+
+    async def _broadcast_provider_failure_to_ops(
+        self,
+        *,
+        source_chat_id: str,
+        inbound_mid: str,
+        content: str,
+        failure_kind: str,
+        session: aiohttp.ClientSession | None = None,
+    ) -> bool:
+        """Forward a suppressed terminal provider failure to operations."""
+        notice = _format_provider_failure_ops_notice(
+            source_chat_id=source_chat_id,
+            inbound_mid=inbound_mid,
+            content=content,
+            failure_kind=failure_kind,
+        )
+        return await self._broadcast_ops_notice(
+            notice,
+            session=session,
+            extra={
+                "ops_provider_failure_broadcast": True,
+                "source_chat_id": source_chat_id,
+                "inbound_message_id": inbound_mid,
+                "provider_failure_kind": failure_kind,
+            },
+            log_context=f"provider failure source={source_chat_id}",
+        )
+
+    def _claim_provider_failure_ops_notice(
+        self,
+        *,
+        source_chat_id: str,
+        inbound_mid: str,
+        content: str,
+        failure_kind: str,
+    ) -> bool:
+        """Claim one operations notice for a provider failure retry burst."""
+        now = asyncio.get_running_loop().time()
+        cutoff = now - _PROVIDER_FAILURE_NOTICE_TTL_SECONDS
+        stale_keys = [
+            key
+            for key, claimed_at in self._provider_failure_notice_times.items()
+            if claimed_at < cutoff
+        ]
+        for key in stale_keys:
+            self._provider_failure_notice_times.pop(key, None)
+
+        correlation = str(inbound_mid or "").strip()
+        if correlation:
+            notice_key = (
+                str(source_chat_id or ""),
+                f"mid:{correlation}\nkind:{failure_kind}",
+            )
+        else:
+            notice_key = (
+                str(source_chat_id or ""),
+                f"payload:{failure_kind}\n{str(content or '').strip()}",
+            )
+        if notice_key in self._provider_failure_notice_times:
+            return False
+        # Claim before the first await so concurrent retry callbacks cannot race.
+        self._provider_failure_notice_times[notice_key] = now
+        return True
 
     async def _redirect_group_status_to_admin(
         self,

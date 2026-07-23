@@ -8,6 +8,13 @@ versioning (with prerelease suffixes such as `0.1.0b1` for betas).
 
 ## [Unreleased]
 
+### Fixed
+
+- Suppress exhausted provider streaming/connection error replies in both
+  Infoflow groups and direct messages, forward one deduplicated diagnostic per
+  inbound turn to `INFOFLOW_OP_CHANNEL`, and keep the source chat silent even
+  when the operations notification cannot be delivered.
+
 ## [2026.6.11] - 2026-06-11
 
 ### Added
