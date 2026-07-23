@@ -49,6 +49,65 @@ async def test_prepare_outbound_message_refreshes_members_for_unmatched_mentions
     assert calls[1]["force_refresh"] is True
 
 
+async def test_prepare_outbound_message_resolves_unique_prefix_after_refresh() -> None:
+    calls: list[dict] = []
+
+    async def get_group_members(group_id: str, **kwargs):
+        calls.append(kwargs)
+        return [GroupMember(uid="mayao_cd", name="马遥", is_bot=False)]
+
+    text, options = await prepare_outbound_message(
+        "@mayao ping",
+        group_id="13214756",
+        metadata=None,
+        get_group_members=get_group_members,
+    )
+
+    assert text == "@mayao_cd ping"
+    assert options.mention_user_ids == "mayao_cd"
+    assert len(calls) == 2
+    assert calls[1]["force_refresh"] is True
+
+
+async def test_prepare_outbound_message_does_not_guess_ambiguous_prefix() -> None:
+    calls: list[dict] = []
+
+    async def get_group_members(group_id: str, **kwargs):
+        calls.append(kwargs)
+        return [
+            GroupMember(uid="mayao_cd", name="马遥", is_bot=False),
+            GroupMember(uid="mayao02", name="Mayao 02", is_bot=False),
+        ]
+
+    text, options = await prepare_outbound_message(
+        "@mayao ping",
+        group_id="13214756",
+        metadata=None,
+        get_group_members=get_group_members,
+    )
+
+    assert text == "@mayao ping"
+    assert options.mention_user_ids == ""
+    assert len(calls) == 2
+    assert calls[1]["force_refresh"] is True
+
+
+async def test_prepare_outbound_message_applies_blacklist_after_prefix_resolution() -> None:
+    async def get_group_members(group_id: str, **kwargs):
+        return [GroupMember(uid="mayao_cd", name="马遥", is_bot=False)]
+
+    text, options = await prepare_outbound_message(
+        "@mayao ping",
+        group_id="13214756",
+        metadata=None,
+        get_group_members=get_group_members,
+        outbound_mention_blacklist={"user_ids": ["mayao_cd"]},
+    )
+
+    assert text == "@mayao ping"
+    assert options.mention_user_ids == ""
+
+
 async def test_prepare_outbound_message_normalizes_internal_user_marker_for_group() -> None:
     async def get_group_members(group_id: str, **kwargs):
         return []

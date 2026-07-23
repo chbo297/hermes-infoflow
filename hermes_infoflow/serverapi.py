@@ -52,6 +52,7 @@ from .mention_blacklist import (
     normalize_outbound_mention_blacklist,
     outbound_mention_blacklist_sets,
 )
+from .mention_resolution import resolve_human_mention
 from .utils import _ImageLoadError
 
 if TYPE_CHECKING:
@@ -1430,6 +1431,117 @@ class ServerAPI:
                 out.append(filtered)
         return out, changed
 
+    def _canonicalize_explicit_human_mentions(
+        self,
+        body: list[dict[str, Any]],
+        maps: dict[str, Any],
+        *,
+        group_id: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Resolve explicit human AT ids against the current member snapshot."""
+        human_uids: set[str] = maps.get("human_uids") or set()
+        if not human_uids:
+            return body, {}
+
+        out: list[dict[str, Any]] = []
+        resolved_prefixes: dict[str, str] = {}
+        for item in body:
+            if str(item.get("type") or "").upper() != "AT":
+                out.append(item)
+                continue
+
+            copied = dict(item)
+            user_ids: list[str] = []
+            for raw_user_id in item.get("atuserids") or []:
+                requested = str(raw_user_id or "").strip()
+                if not requested:
+                    continue
+                resolution = resolve_human_mention(requested, human_uids)
+                resolved_user_id = resolution.resolved or requested
+                if resolution.used_prefix:
+                    resolved_prefixes[requested] = resolved_user_id
+                    logger.info(
+                        "[iflow:send] resolved explicit human @ mention by unique prefix: "
+                        "group_id=%s raw=%s resolved=%s",
+                        group_id,
+                        requested,
+                        resolved_user_id,
+                    )
+                elif resolution.ambiguous:
+                    logger.info(
+                        "[iflow:send] ambiguous explicit human @ mention prefix left unresolved: "
+                        "group_id=%s raw=%s candidates=%s",
+                        group_id,
+                        requested,
+                        list(resolution.candidates),
+                    )
+                if resolved_user_id not in user_ids:
+                    user_ids.append(resolved_user_id)
+
+            if user_ids:
+                copied["atuserids"] = user_ids
+            else:
+                copied.pop("atuserids", None)
+            out.append(copied)
+        return out, resolved_prefixes
+
+    def _rewrite_inline_human_mention_prefixes(
+        self,
+        text: str,
+        maps: dict[str, Any],
+        *,
+        group_id: str,
+    ) -> tuple[str, dict[str, str]]:
+        """Canonicalize uniquely abbreviated human @ tokens in message text."""
+        if not text:
+            return text, {}
+        human_uids: set[str] = maps.get("human_uids") or set()
+        if not human_uids:
+            return text, {}
+        bot_names: dict[str, int] = maps.get("bot_names") or {}
+
+        replacements: list[tuple[int, int, str]] = []
+        resolved_prefixes: dict[str, str] = {}
+        logged_ambiguous: set[str] = set()
+        for match in _SEND_AT_RE.finditer(text):
+            if match.start() > 0 and text[match.start() - 1] not in " \t\r\n":
+                continue
+            requested = match.group(1)
+            requested_lower = requested.lower()
+            if (
+                requested_lower in ("all", "所有人")
+                or requested.isdigit()
+                or requested in human_uids
+                or requested_lower in bot_names
+            ):
+                continue
+
+            resolution = resolve_human_mention(requested, human_uids)
+            if resolution.used_prefix and resolution.resolved is not None:
+                replacements.append((match.start(1), match.end(1), resolution.resolved))
+                resolved_prefixes[requested] = resolution.resolved
+            elif resolution.ambiguous and requested not in logged_ambiguous:
+                logged_ambiguous.add(requested)
+                logger.info(
+                    "[iflow:send] ambiguous inline human @ mention prefix left unresolved: "
+                    "group_id=%s raw=%s candidates=%s",
+                    group_id,
+                    requested,
+                    list(resolution.candidates),
+                )
+
+        for start, end, resolved_user_id in reversed(replacements):
+            text = text[:start] + resolved_user_id + text[end:]
+        for requested, resolved_user_id in sorted(resolved_prefixes.items()):
+            logger.info(
+                "[iflow:send] resolved inline human @ mention by unique prefix: "
+                "group_id=%s raw=%s resolved=%s",
+                group_id,
+                requested,
+                resolved_user_id,
+            )
+        return text, resolved_prefixes
+
     def _group_text_body_items(
         self,
         text: str,
@@ -1521,9 +1633,17 @@ class ServerAPI:
         session: aiohttp.ClientSession | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, str]], str | None]:
         maps = await self._group_member_maps(group_id, session=session)
+        explicit_at_items, explicit_resolutions = (
+            self._canonicalize_explicit_human_mentions(
+                explicit_at_items,
+                maps,
+                group_id=group_id,
+            )
+        )
         explicit_at_items, filtered_by_blacklist = self._filter_group_body_for_outbound_blacklist(
             explicit_at_items,
         )
+        resolved_prefixes = dict(explicit_resolutions)
         has_any_image = any(seg["kind"] in ("image", "image_bytes") for seg in segments)
         packets: list[dict[str, Any]] = []
         current: list[dict[str, Any]] = []
@@ -1584,13 +1704,21 @@ class ServerAPI:
         for seg in segments:
             ensure_explicit_at()
             if seg["kind"] == "text":
+                segment_text, inline_resolutions = (
+                    self._rewrite_inline_human_mention_prefixes(
+                        seg.get("text") or "",
+                        maps,
+                        group_id=group_id,
+                    )
+                )
+                resolved_prefixes.update(inline_resolutions)
                 text_type = "TEXT" if (
                     force_text_payload
                     or has_any_image
                     or format_mode == "text"
                 ) else "MD"
                 text_items, text_filtered_by_blacklist = self._group_text_body_items(
-                    seg.get("text") or "",
+                    segment_text,
                     maps,
                     text_type=text_type,
                     skip_at_all=explicit_at_all,
@@ -1634,6 +1762,18 @@ class ServerAPI:
             if filtered_by_blacklist
             else []
         )
+        if resolved_prefixes:
+            rendered = ", ".join(
+                f"{requested} -> {resolved}"
+                for requested, resolved in sorted(resolved_prefixes.items())
+            )
+            packet_warnings.insert(
+                0,
+                _warning(
+                    "mention_prefix_resolved",
+                    f"resolved human @ mention prefixes: {rendered}",
+                ),
+            )
         return packets, packet_warnings, None
 
     async def _build_private_packets(

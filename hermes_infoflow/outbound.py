@@ -10,6 +10,7 @@ from typing import Any
 
 from .itypes import SendOptions
 from .mention_blacklist import outbound_mention_blacklist_sets
+from .mention_resolution import resolve_human_mention
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,16 @@ def _at_iter(text: str) -> list[tuple[str, int, int]]:
             continue
         results.append((match.group(0), match.start(), match.end()))
     return results
+
+
+def _rewrite_at_token(text: str, requested: str, resolved: str) -> str:
+    """Rewrite exact outbound @ tokens without touching emails or substrings."""
+    if not requested or requested == resolved:
+        return text
+    for match_text, start, end in reversed(_at_iter(text)):
+        if match_text[1:] == requested:
+            text = text[:start] + f"@{resolved}" + text[end:]
+    return text
 
 
 def _metadata_string_values(value: Any) -> list[str]:
@@ -417,10 +428,43 @@ async def prepare_outbound_message(
                     if mention in blocked_users:
                         unmatched.remove(mention)
                         continue
-                    if any(member.uid == mention for member in members if not member.is_bot):
-                        if mention not in user_ids:
-                            user_ids.append(mention)
+                    resolution = resolve_human_mention(
+                        mention,
+                        (member.uid for member in members if not member.is_bot),
+                    )
+                    if resolution.resolved is not None:
+                        resolved_user_id = resolution.resolved
+                        if resolved_user_id in blocked_users:
+                            logger.info(
+                                "[iflow:send] dropping human @ mention resolved to "
+                                "blacklisted user_id=%s from raw=%s",
+                                resolved_user_id,
+                                resolution.requested,
+                            )
+                            unmatched.remove(mention)
+                            continue
+                        if resolved_user_id not in user_ids:
+                            user_ids.append(resolved_user_id)
+                        if resolution.used_prefix:
+                            text = _rewrite_at_token(
+                                text,
+                                resolution.requested,
+                                resolved_user_id,
+                            )
+                            logger.info(
+                                "[iflow:send] resolved human @ mention by unique prefix: "
+                                "raw=%s resolved=%s",
+                                resolution.requested,
+                                resolved_user_id,
+                            )
                         unmatched.remove(mention)
+                    elif resolution.ambiguous:
+                        logger.info(
+                            "[iflow:send] ambiguous human @ mention prefix left unresolved: "
+                            "raw=%s candidates=%s",
+                            resolution.requested,
+                            list(resolution.candidates),
+                        )
             if unmatched:
                 logger.info(
                     "[iflow:send] @ mentions discarded (no member match): %s",

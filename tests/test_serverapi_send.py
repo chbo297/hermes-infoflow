@@ -1305,6 +1305,250 @@ def test_send_group_message_intent_md_mentions_include_placeholders(
     ]
 
 
+def test_send_group_message_intent_resolves_unique_human_prefix_everywhere(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+    member_calls: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **kwargs):
+        assert group_id == "13214756"
+        member_calls.append(kwargs)
+        return [GroupMember(uid="mayao_cd", name="马遥", is_bot=False)]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings=_settings())
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="@mayao please review",
+        mention_user_ids=["mayao"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "mention_prefix_resolved",
+            "message": "resolved human @ mention prefixes: mayao -> mayao_cd",
+        },
+    )
+    assert captured[0]["msgtype"] == "MD"
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["mayao_cd"]},
+        {"type": "MD", "content": "@mayao_cd please review"},
+    ]
+    assert len(member_calls) == 1
+    assert member_calls[0].get("force_refresh", False) is False
+
+
+def test_send_group_message_intent_exact_human_id_beats_prefix_candidates(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        return [
+            GroupMember(uid="mayao", name="Mayao", is_bot=False),
+            GroupMember(uid="mayao_cd", name="马遥", is_bot=False),
+        ]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings=_settings())
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="@mayao please review",
+        mention_user_ids=["mayao"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == ()
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["mayao"]},
+        {"type": "MD", "content": "@mayao please review"},
+    ]
+
+
+def test_send_group_message_intent_does_not_guess_ambiguous_human_prefix(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        return [
+            GroupMember(uid="mayao_cd", name="马遥", is_bot=False),
+            GroupMember(uid="mayao02", name="Mayao 02", is_bot=False),
+        ]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings=_settings())
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="@mayao please review",
+        mention_user_ids=["mayao"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == ()
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["mayao"]},
+        {"type": "MD", "content": "@mayao please review"},
+    ]
+
+
+def test_send_group_message_intent_dedupes_prefix_and_canonical_human_ids(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        return [GroupMember(uid="mayao_cd", name="马遥", is_bot=False)]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings=_settings())
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="please review",
+        mention_user_ids=["mayao", "mayao_cd"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "mention_prefix_resolved",
+            "message": "resolved human @ mention prefixes: mayao -> mayao_cd",
+        },
+    )
+    assert captured[0]["body"] == [
+        {"type": "AT", "atuserids": ["mayao_cd"]},
+        {"type": "MD", "content": "@mayao_cd please review"},
+    ]
+
+
+def test_send_group_message_intent_exact_bot_name_beats_human_prefix(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        return [
+            GroupMember(uid="mayao_cd", name="马遥", is_bot=False),
+            GroupMember(uid="17212", name="mayao", agent_id=17212, is_bot=True),
+        ]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings=_settings())
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="@mayao please review",
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == ()
+    assert captured[0]["body"][0] == {"type": "AT", "atagentids": [17212]}
+    assert "atuserids" not in captured[0]["body"][0]
+    assert "@mayao" in captured[0]["body"][1]["content"]
+
+
+def test_send_group_message_intent_applies_blacklist_after_prefix_resolution(
+    monkeypatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    async def fake_send_group_payload(account, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True, "messageid": "G-1", "msgseqid": "S-1"}
+
+    async def fake_get_group_members(self, group_id, **_kwargs):
+        return [GroupMember(uid="mayao_cd", name="马遥", is_bot=False)]
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "send_group_payload",
+        fake_send_group_payload,
+    )
+    monkeypatch.setattr(ServerAPI, "get_group_members", fake_get_group_members)
+    api = ServerAPI(settings={
+        **_settings(),
+        "outbound_mention_blacklist": {"user_ids": ["mayao_cd"]},
+    })
+
+    result = asyncio.run(api.send_group_message_intent(
+        "13214756",
+        message="@mayao please review",
+        mention_user_ids=["mayao"],
+        session=object(),
+    ))
+
+    assert result.success is True
+    assert result.warnings == (
+        {
+            "code": "mention_prefix_resolved",
+            "message": "resolved human @ mention prefixes: mayao -> mayao_cd",
+        },
+        {
+            "code": "outbound_mention_blacklist",
+            "message": "blacklisted @ mentions were removed",
+        },
+    )
+    assert captured[0]["body"] == [
+        {"type": "MD", "content": "@mayao_cd please review"},
+    ]
+
+
 def test_send_group_message_intent_at_all_and_specific_uses_md_payload(
     monkeypatch,
 ) -> None:
