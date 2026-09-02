@@ -395,7 +395,7 @@ https://<your-domain>/webhook/infoflow/sessiontracker?chatType=7&chatId=39500876
 
 私聊 admin 终端：`INFOFLOW_SESSIONTRACKER_TERMINAL_ENABLED=true` 后，只有 `chatType=1|7` 且 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 的页面会显示 `Terminal` tab。该 tab 可同时保留最多 4 个 PTY session；关闭页面、刷新页面、断网只会断开浏览器传输层，PTY 默认继续保留 48 小时，再次打开会列出并复用已有 session。桌面端优先使用 WebSocket，移动端优先使用 HTTP polling 并在后台静默尝试升级到 WebSocket。点击断开图标会关闭当前 PTY。群聊页面不显示该 tab。
 
-管理员撤回：私聊和群聊页面的 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 时，Tracker 底部显示“撤回最新一条消息”悬浮按钮。点击后先冻结当前最新一条机器人消息，并显示最多 20 个字符的确认文案；只有再点击“确认撤回”才会调用如流撤回接口，“取消”不会发起请求。每次只撤回一条，成功后该消息从 recent-sent 记录中移除，因此再次操作会依次撤回更早的消息。服务端会在每次预览和确认时重新校验管理员身份、当前聊天目标及冻结的消息 ID，并串行处理同一聊天的请求。
+管理员撤回：私聊和群聊页面的 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 时，Tracker 底部显示“撤回最新一条消息”悬浮按钮。点击后先冻结当前最新一条机器人消息，确认提示第一行显示“确认撤回？”，第二行用中文双引号包裹最多 20 个字符的消息原文；只有再点击“确认撤回”才会调用如流撤回接口，“取消”不会发起请求。每次只撤回一条，成功后该消息从 recent-sent 记录中移除，因此再次操作会依次撤回更早的消息。服务端会在每次预览和确认时重新校验管理员身份、当前聊天目标及冻结的消息 ID，并串行处理同一聊天的请求。
 
 关闭：`INFOFLOW_SESSIONTRACKER_ENABLED=false`。
 

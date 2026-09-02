@@ -690,8 +690,13 @@ body.recall-action-visible #scroll-bottom { bottom: var(--recall-dock-space); }
   box-shadow: 0 8px 28px rgba(0, 0, 0, .55); max-height: calc(100vh - 32px);
   overflow-y: auto; }
 .recall-panel[hidden], .recall-button[hidden] { display: none; }
-.recall-prompt { min-height: 20px; color: #f0f6fc; text-align: center;
-  white-space: pre-wrap; word-break: break-word; }
+.recall-prompt { min-height: 40px; color: #f0f6fc; text-align: center; }
+.recall-prompt-line { min-height: 20px; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.recall-prompt-quote { display: flex; justify-content: center; min-width: 0; }
+.recall-prompt-quote[hidden] { display: none; }
+#recall-prompt-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
 .recall-button { width: 100%; min-height: 40px; border: 1px solid #6e3630;
   border-radius: 6px; background: #21262d; color: #ff7b72; padding: 8px 12px;
   font: inherit; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); }
@@ -745,7 +750,10 @@ _SESSIONTRACKER_HTML = """<!DOCTYPE html>
   <div id="recall-dock" class="recall-dock">
     <button type="button" id="recall-open" class="recall-button">撤回最新一条消息</button>
     <div id="recall-confirm-panel" class="recall-panel" role="group" aria-label="确认撤回消息" hidden>
-      <div id="recall-prompt" class="recall-prompt" aria-live="polite"></div>
+      <div id="recall-prompt" class="recall-prompt" aria-live="polite">
+        <div id="recall-prompt-heading" class="recall-prompt-line"></div>
+        <div id="recall-prompt-quote" class="recall-prompt-line recall-prompt-quote" hidden><span>“</span><span id="recall-prompt-preview"></span><span>”</span></div>
+      </div>
       <button type="button" id="recall-confirm" class="recall-button confirm">确认撤回</button>
       <button type="button" id="recall-cancel" class="recall-button cancel">取消</button>
     </div>
@@ -783,7 +791,9 @@ const terminalFallback = document.getElementById('terminal-fallback');
 const recallDock = document.getElementById('recall-dock');
 const recallOpen = document.getElementById('recall-open');
 const recallConfirmPanel = document.getElementById('recall-confirm-panel');
-const recallPrompt = document.getElementById('recall-prompt');
+const recallPromptHeading = document.getElementById('recall-prompt-heading');
+const recallPromptQuote = document.getElementById('recall-prompt-quote');
+const recallPromptPreview = document.getElementById('recall-prompt-preview');
 const recallConfirm = document.getElementById('recall-confirm');
 const recallCancel = document.getElementById('recall-cancel');
 let autoFollow = true;
@@ -835,8 +845,15 @@ function recallApiUrl() {
   return apiBase + '/admin/recall/latest' + (qs ? '?' + qs : '');
 }
 
-function recallPromptText(candidate, prefix = '确认撤回') {
-  return prefix + String(candidate && candidate.preview ? candidate.preview : '[无文字内容]') + ' 消息';
+function setRecallPrompt(heading, preview = '') {
+  recallPromptHeading.textContent = heading;
+  recallPromptPreview.textContent = preview;
+  recallPromptQuote.hidden = !preview;
+}
+
+function showRecallConfirmation(candidate, heading = '确认撤回？') {
+  const preview = String(candidate && candidate.preview ? candidate.preview : '[无文字内容]');
+  setRecallPrompt(heading, preview);
 }
 
 function updateRecallLayout() {
@@ -873,7 +890,7 @@ function closeRecallConfirmation() {
   recallConfirmPanel.hidden = true;
   recallConfirm.disabled = false;
   recallCancel.disabled = false;
-  recallPrompt.textContent = '';
+  setRecallPrompt('');
   updateRecallLayout();
 }
 
@@ -895,7 +912,7 @@ async function openRecallConfirmation() {
   recallCandidate = null;
   recallOpen.hidden = true;
   recallConfirmPanel.hidden = false;
-  recallPrompt.textContent = '正在获取最新一条消息…';
+  setRecallPrompt('正在获取最新一条消息…');
   recallConfirm.disabled = true;
   recallCancel.disabled = false;
   updateRecallLayout();
@@ -906,16 +923,16 @@ async function openRecallConfirmation() {
     if (!r.ok) throw new Error(data.error || '获取待撤回消息失败');
     recallCandidate = data.candidate || null;
     if (!recallCandidate) {
-      recallPrompt.textContent = '当前会话没有可撤回的消息';
+      setRecallPrompt('当前会话没有可撤回的消息');
       recallConfirm.disabled = true;
       return;
     }
-    recallPrompt.textContent = recallPromptText(recallCandidate);
+    showRecallConfirmation(recallCandidate);
     recallConfirm.disabled = false;
   } catch (err) {
     if (token !== recallRequestToken) return;
-    recallPrompt.textContent = '获取待撤回消息失败：' +
-      (err && err.message ? err.message : err);
+    setRecallPrompt('获取待撤回消息失败：' +
+      (err && err.message ? err.message : err));
     recallConfirm.disabled = true;
   }
 }
@@ -925,7 +942,10 @@ async function confirmLatestRecall() {
   const submitted = recallCandidate;
   const token = ++recallRequestToken;
   recallSubmitting = true;
-  recallPrompt.textContent = '正在撤回' + String(submitted.preview || '[无文字内容]') + ' 消息…';
+  setRecallPrompt(
+    '正在撤回…',
+    String(submitted.preview || '[无文字内容]')
+  );
   recallConfirm.disabled = true;
   recallCancel.disabled = true;
   try {
@@ -943,19 +963,19 @@ async function confirmLatestRecall() {
     }
     if (r.status === 409 && data.candidate) {
       recallCandidate = data.candidate;
-      recallPrompt.textContent = recallPromptText(
+      showRecallConfirmation(
         recallCandidate,
-        '最新消息已变化，请确认撤回'
+        '最新消息已变化，请确认撤回？'
       );
     } else if (r.status === 404) {
       recallCandidate = null;
-      recallPrompt.textContent = '当前会话没有可撤回的消息';
+      setRecallPrompt('当前会话没有可撤回的消息');
     } else {
-      recallPrompt.textContent = '撤回失败：' + (data.error || '如流接口返回错误');
+      setRecallPrompt('撤回失败：' + (data.error || '如流接口返回错误'));
     }
   } catch (err) {
     if (token !== recallRequestToken) return;
-    recallPrompt.textContent = '撤回失败：' + (err && err.message ? err.message : err);
+    setRecallPrompt('撤回失败：' + (err && err.message ? err.message : err));
   }
   recallSubmitting = false;
   recallConfirm.disabled = !recallCandidate;

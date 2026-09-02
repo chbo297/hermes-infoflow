@@ -463,6 +463,16 @@ async def test_sessiontracker_routes_resolve_and_stream() -> None:
         assert page_html.index('id="recall-prompt"') < page_html.index(
             'id="recall-confirm"'
         ) < page_html.index('id="recall-cancel"')
+        assert 'id="recall-prompt-heading"' in page_html
+        assert 'id="recall-prompt-preview"' in page_html
+        assert '<span>“</span>' in page_html
+        assert '<span>”</span>' in page_html
+        assert "heading = '确认撤回？'" in page_html
+        assert "showRecallConfirmation(recallCandidate);" in page_html
+        assert "'最新消息已变化，请确认撤回？'" in page_html
+        assert ".recall-prompt-line { min-height: 20px; white-space: nowrap;" in page_html
+        assert "'正在撤回…'," in page_html
+        assert "String(submitted.preview || '[无文字内容]')" in page_html
         assert "message_id: String(submitted.message_id || '')" in page_html
 
         resp = await client.get(
