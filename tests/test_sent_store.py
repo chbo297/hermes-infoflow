@@ -152,6 +152,91 @@ def test_recent_merges_in_memory_and_db(tmp_path: Path) -> None:
     assert ids.index("NEW-1") < ids.index("OLD-1")
 
 
+def test_recent_prefers_newer_db_entry_over_stale_in_memory_entry(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "sent.db"
+    gateway = SentMessageStore(db_path=db, account_id="acct")
+    gateway.record("group:1", "OLD-1", now=1_000.0)
+
+    cron = SentMessageStore(db_path=db, account_id="acct")
+    cron.record("group:1", "NEW-1", now=2_000.0)
+
+    assert [item.messageid for item in gateway.recent("group:1", count=1)] == [
+        "NEW-1"
+    ]
+
+
+def test_recent_uses_sqlite_id_to_break_cross_process_timestamp_ties(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "sent.db"
+    gateway = SentMessageStore(db_path=db, account_id="acct")
+    gateway.record("group:1", "OLD-1", now=1_000.0)
+
+    cron = SentMessageStore(db_path=db, account_id="acct")
+    cron.record("group:1", "NEW-1", now=1_000.0)
+
+    assert [item.messageid for item in gateway.recent("group:1", count=2)] == [
+        "NEW-1",
+        "OLD-1",
+    ]
+
+
+def test_recent_does_not_resurface_cross_process_recall_from_stale_memory(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "sent.db"
+    gateway = SentMessageStore(db_path=db, account_id="acct")
+    gateway.record("group:1", "A", msgseqid="1", now=1.0)
+    gateway.record("group:1", "B", msgseqid="2", now=2.0)
+    gateway.record("group:1", "C", msgseqid="3", now=3.0)
+
+    worker = SentMessageStore(db_path=db, account_id="acct")
+    worker.remove("group:1", "C")
+
+    assert [item.messageid for item in gateway.recent("group:1", count=3)] == [
+        "B",
+        "A",
+    ]
+    assert gateway.find("group:1", "C") is None
+    assert gateway.find_any("C") is None
+
+    # A delayed duplicate bookkeeping write must not clear the monotonic
+    # recall tombstone or make the unique Infoflow message ID visible again.
+    gateway.record("group:1", "C", msgseqid="3", now=4.0)
+    assert [item.messageid for item in gateway.recent("group:1", count=3)] == [
+        "B",
+        "A",
+    ]
+    fresh = SentMessageStore(db_path=db, account_id="acct")
+    assert [item.messageid for item in fresh.recent("group:1", count=3)] == [
+        "B",
+        "A",
+    ]
+
+
+def test_recent_group_prefers_server_sequence_when_responses_finish_out_of_order(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "sent.db"
+    gateway = SentMessageStore(db_path=db, account_id="acct")
+    # NEWER was accepted by Infoflow second (larger msgseqid), but its API
+    # response completed first and therefore has the earlier local timestamp.
+    gateway.record("group:1", "NEWER", msgseqid="200", now=1.0)
+    gateway.record("group:1", "OLDER", msgseqid="100", now=2.0)
+
+    assert [item.messageid for item in gateway.recent("group:1", count=2)] == [
+        "NEWER",
+        "OLDER",
+    ]
+    fresh = SentMessageStore(db_path=db, account_id="acct")
+    assert [item.messageid for item in fresh.recent("group:1", count=2)] == [
+        "NEWER",
+        "OLDER",
+    ]
+
+
 def test_concurrent_writers_dont_lose_records(tmp_path: Path) -> None:
     """Multiple threads using their own ``SentMessageStore`` against the same
     DB file must not lose records under WAL contention. Regression for the

@@ -191,6 +191,8 @@ def test_adapter_construction_reads_env(configured_env, monkeypatch) -> None:
     assert adapter._policy.reply_mode == "mention-and-watch"
     assert adapter._policy.require_mention is True
     assert adapter.gateway_runner is None
+    assert adapter._webhook_server._recall_sent_store is adapter._sent_store
+    assert adapter._webhook_server._recall_message == adapter.delete_message
 
 
 def test_idle_session_reset_rotates_before_unread_context(configured_env, tmp_path, monkeypatch) -> None:

@@ -15,9 +15,12 @@ from hermes_infoflow.dashboard import (
     normalize_chat_id,
     sessiontracker_enabled,
 )
+from hermes_infoflow.itypes import RecallResult
+from hermes_infoflow.sent_store import SentMessageStore
 from hermes_infoflow.sessiontracker import (
     TERMINAL_EVENT_KINDS,
     _code_user_cache,
+    _recall_preview_text,
     canonical_for_stream_access,
     event_to_terminal_dict,
     format_terminal_line,
@@ -58,6 +61,19 @@ def test_normalize_chat_id() -> None:
     assert normalize_chat_id("infoflow:group:99") == "group:99"
     assert normalize_chat_id("group:99") == "group:99"
     assert normalize_chat_id("alice") == "alice"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("12345678901234567890", "12345678901234567890"),
+        ("123456789012345678901", "12345678901234567890..."),
+        ("line one\n  line two", "line one line two"),
+        ("", "[无文字内容]"),
+    ],
+)
+def test_recall_preview_text(value: str, expected: str) -> None:
+    assert _recall_preview_text(value) == expected
 
 
 def test_format_terminal_line_llm_response_is_metadata() -> None:
@@ -440,7 +456,14 @@ async def test_sessiontracker_routes_resolve_and_stream() -> None:
             "/webhook/infoflow/sessiontracker?chatType=6&chatId=1",
         )
         assert resp.status == 200
-        assert "Session Tracker" in await resp.text()
+        page_html = await resp.text()
+        assert "Session Tracker" in page_html
+        assert '>撤回最新一条消息</button>' in page_html
+        assert 'id="recall-dock"' in page_html
+        assert page_html.index('id="recall-prompt"') < page_html.index(
+            'id="recall-confirm"'
+        ) < page_html.index('id="recall-cancel"')
+        assert "message_id: String(submitted.message_id || '')" in page_html
 
         resp = await client.get(
             "/webhook/infoflow/sessiontracker/api/resolve?chatType=6&chatId=1",
@@ -450,6 +473,7 @@ async def test_sessiontracker_routes_resolve_and_stream() -> None:
         assert body["canonical_chat_id"] == "group:1"
         assert body["session_id"] == "chat:group:1"
         assert body["hermes_session_id"] == "st-sess"
+        assert body["recall_enabled"] is False
 
         resp = await client.get(
             "/webhook/infoflow/sessiontracker?chatType=4&chatId=1",
@@ -481,6 +505,292 @@ async def test_sessiontracker_routes_resolve_and_stream() -> None:
             "?session_id=chat:group:1&chatType=6&chatId=999",
         )
         assert resp.status == 403
+
+
+@pytest.mark.asyncio
+async def test_sessiontracker_admin_recall_group_runs_latest_c_b_a(
+    monkeypatch: pytest.MonkeyPatch,
+    account: InfoflowAccountAPI,
+) -> None:
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.setenv("INFOFLOW_ADMIN_USER", "owner")
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker._read_infoflow_account",
+        lambda: account,
+    )
+
+    async def _fake_get_user_info_by_code(
+        account: InfoflowAccountAPI,
+        code: str,
+        *,
+        session=None,
+    ) -> str:
+        del account, session
+        return "owner" if code == "owner-code" else "ordinary-user"
+
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker.get_user_info_by_code",
+        _fake_get_user_info_by_code,
+    )
+
+    message_ids = [
+        "1867000000000000001",
+        "1867000000000000002",
+        "1867000000000000003",
+    ]
+    digests = [
+        "消息A",
+        "消息B",
+        "这是第三条消息，它的文案一定会超过二十个字用于确认面板",
+    ]
+    sent_store = SentMessageStore()
+    for index, (message_id, digest) in enumerate(zip(message_ids, digests, strict=True)):
+        sent_store.record(
+            "group:1",
+            message_id,
+            msgseqid=str(index + 1),
+            digest=digest,
+            now=float(index + 1),
+        )
+
+    recalls: list[tuple[str, str]] = []
+
+    async def _recall_message(chat_id: str, message_id: str) -> RecallResult:
+        recalls.append((chat_id, message_id))
+        return RecallResult(success=True)
+
+    app = web.Application()
+    register_sessiontracker_routes(
+        app,
+        SessionTracker(buffer_size=20),
+        base_path="/webhook/infoflow",
+        recall_sent_store=sent_store,
+        recall_message=_recall_message,
+    )
+    endpoint = "/webhook/infoflow/sessiontracker/api/admin/recall/latest"
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(
+            "/webhook/infoflow/sessiontracker/api/resolve?chatType=6&chatId=1",
+        )
+        assert resp.status == 200
+        assert (await resp.json())["recall_enabled"] is False
+
+        resp = await client.get(
+            "/webhook/infoflow/sessiontracker/api/resolve"
+            "?chatType=6&chatId=1&code=owner-code",
+        )
+        assert resp.status == 200
+        resolved = await resp.json()
+        assert resolved["viewer_is_admin"] is True
+        assert resolved["recall_enabled"] is True
+
+        resp = await client.get(
+            endpoint + "?chatType=6&chatId=1&code=user-code",
+        )
+        assert resp.status == 403
+        resp = await client.post(
+            endpoint + "?chatType=6&chatId=1&code=user-code",
+            json={"message_id": message_ids[2]},
+        )
+        assert resp.status == 403
+        assert recalls == []
+
+        admin_endpoint = endpoint + "?chatType=6&chatId=1&code=owner-code"
+        resp = await client.get(admin_endpoint)
+        assert resp.status == 200
+        assert resp.headers["Cache-Control"] == "no-store"
+        candidate = (await resp.json())["candidate"]
+        assert candidate == {
+            "message_id": message_ids[2],
+            "preview": _recall_preview_text(digests[2]),
+            "sent_at_ms": 3000,
+        }
+
+        # A frozen confirmation may not silently switch to another message.
+        resp = await client.post(admin_endpoint, json={"message_id": message_ids[1]})
+        assert resp.status == 409
+        assert (await resp.json())["candidate"]["message_id"] == message_ids[2]
+        assert recalls == []
+
+        for expected_id, next_id in [
+            (message_ids[2], message_ids[1]),
+            (message_ids[1], message_ids[0]),
+            (message_ids[0], None),
+        ]:
+            resp = await client.post(admin_endpoint, json={"message_id": expected_id})
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["ok"] is True
+            assert body["recalled"]["message_id"] == expected_id
+            assert (
+                body["candidate"]["message_id"] if body["candidate"] else None
+            ) == next_id
+
+        resp = await client.get(admin_endpoint)
+        assert resp.status == 200
+        assert (await resp.json()) == {"available": False, "candidate": None}
+
+    assert recalls == [("group:1", message_id) for message_id in reversed(message_ids)]
+    assert all(isinstance(message_id, str) for _, message_id in recalls)
+
+
+@pytest.mark.asyncio
+async def test_sessiontracker_admin_recall_private_uses_resolved_user_target(
+    monkeypatch: pytest.MonkeyPatch,
+    account: InfoflowAccountAPI,
+) -> None:
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.setenv("INFOFLOW_ADMIN_USER", "owner")
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker._read_infoflow_account",
+        lambda: account,
+    )
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker.get_user_info_by_code",
+        AsyncMock(return_value="owner"),
+    )
+
+    sent_store = SentMessageStore()
+    message_id = "private-msgkey-1"
+    sent_store.record("owner", message_id, digest="私聊消息", now=1.0)
+    recalls: list[tuple[str, str]] = []
+
+    async def _recall_message(chat_id: str, recalled_id: str) -> RecallResult:
+        recalls.append((chat_id, recalled_id))
+        return RecallResult(success=True)
+
+    app = web.Application()
+    register_sessiontracker_routes(
+        app,
+        SessionTracker(buffer_size=20),
+        base_path="/webhook/infoflow",
+        recall_sent_store=sent_store,
+        recall_message=_recall_message,
+    )
+    endpoint = (
+        "/webhook/infoflow/sessiontracker/api/admin/recall/latest"
+        "?chatType=7&chatId=ignored&code=owner-code"
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(endpoint)
+        assert resp.status == 200
+        assert (await resp.json())["candidate"]["message_id"] == message_id
+
+        resp = await client.post(endpoint, json={"message_id": message_id})
+        assert resp.status == 200
+        assert (await resp.json())["ok"] is True
+
+    assert recalls == [("owner", message_id)]
+
+
+@pytest.mark.asyncio
+async def test_sessiontracker_admin_recall_failure_keeps_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    account: InfoflowAccountAPI,
+) -> None:
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.setenv("INFOFLOW_ADMIN_USER", "owner")
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker._read_infoflow_account",
+        lambda: account,
+    )
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker.get_user_info_by_code",
+        AsyncMock(return_value="owner"),
+    )
+
+    sent_store = SentMessageStore()
+    sent_store.record("group:1", "message-C", msgseqid="3", digest="C", now=3.0)
+
+    async def _failed_recall(_chat_id: str, _message_id: str) -> RecallResult:
+        return RecallResult(success=False, error="upstream rejected recall")
+
+    app = web.Application()
+    register_sessiontracker_routes(
+        app,
+        SessionTracker(buffer_size=20),
+        base_path="/webhook/infoflow",
+        recall_sent_store=sent_store,
+        recall_message=_failed_recall,
+    )
+    endpoint = (
+        "/webhook/infoflow/sessiontracker/api/admin/recall/latest"
+        "?chatType=6&chatId=1&code=owner-code"
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(endpoint, json={"message_id": "message-C"})
+        assert resp.status == 502
+        assert (await resp.json())["error"] == "upstream rejected recall"
+
+        resp = await client.get(endpoint)
+        assert resp.status == 200
+        assert (await resp.json())["candidate"]["message_id"] == "message-C"
+
+
+@pytest.mark.asyncio
+async def test_sessiontracker_admin_recall_serializes_duplicate_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    account: InfoflowAccountAPI,
+) -> None:
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+
+    monkeypatch.setenv("INFOFLOW_ADMIN_USER", "owner")
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker._read_infoflow_account",
+        lambda: account,
+    )
+    monkeypatch.setattr(
+        "hermes_infoflow.sessiontracker.get_user_info_by_code",
+        AsyncMock(return_value="owner"),
+    )
+
+    sent_store = SentMessageStore()
+    sent_store.record("group:1", "message-C", msgseqid="3", digest="C", now=3.0)
+    call_count = 0
+
+    async def _slow_recall(_chat_id: str, _message_id: str) -> RecallResult:
+        nonlocal call_count
+        call_count += 1
+        await asyncio.sleep(0.01)
+        return RecallResult(success=True)
+
+    app = web.Application()
+    register_sessiontracker_routes(
+        app,
+        SessionTracker(buffer_size=20),
+        base_path="/webhook/infoflow",
+        recall_sent_store=sent_store,
+        recall_message=_slow_recall,
+    )
+    endpoint = (
+        "/webhook/infoflow/sessiontracker/api/admin/recall/latest"
+        "?chatType=6&chatId=1&code=owner-code"
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        first, second = await asyncio.gather(
+            client.post(endpoint, json={"message_id": "message-C"}),
+            client.post(endpoint, json={"message_id": "message-C"}),
+        )
+        assert sorted((first.status, second.status)) == [200, 404]
+        await first.read()
+        await second.read()
+
+    assert call_count == 1
 
 
 @pytest.mark.asyncio

@@ -9,25 +9,18 @@ import logging
 import os
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 from .api import InfoflowAccountAPI, InfoflowAPIError, get_user_info_by_code
 from .dashboard import (
+    TRACKER_SESSION_PREFIX,
     SessionEvent,
     SessionTracker,
-    TRACKER_SESSION_PREFIX,
     normalize_chat_id,
     sessiontracker_enabled,
     sessiontracker_full_user_message_enabled,
-)
-from .settings import DEFAULT_API_HOST, infoflow_admin_users_from_env
-from .sse import (
-    SSE_HEARTBEAT,
-    SSE_HEARTBEAT_INTERVAL_SECONDS,
-    SSE_RESPONSE_HEADERS,
-    write_sse,
 )
 from .sessiontracker_terminal import (
     close_terminal_session,
@@ -43,6 +36,13 @@ from .sessiontracker_terminal import (
     sessiontracker_terminal_max_per_admin,
     sessiontracker_terminal_retention_seconds,
     write_terminal_input,
+)
+from .settings import DEFAULT_API_HOST, infoflow_admin_users_from_env
+from .sse import (
+    SSE_HEARTBEAT,
+    SSE_HEARTBEAT_INTERVAL_SECONDS,
+    SSE_RESPONSE_HEADERS,
+    write_sse,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ TERMINAL_EVENT_KINDS = frozenset({
 GROUP_CHAT_TYPES = frozenset({2, 3, 5, 6})
 DM_CHAT_TYPES = frozenset({1, 7})
 SUPPORTED_CHAT_TYPES = GROUP_CHAT_TYPES | DM_CHAT_TYPES
+RECALL_PREVIEW_MAX_CHARS = 20
 
 _PROGRESS_LINE_RE = re.compile(r"^[┊\s]*[🔍⚙️💻🌐📁📝🧠✨]")
 
@@ -387,6 +388,40 @@ def _parse_cursor(raw: str) -> int:
         raise ValueError("cursor must be a non-negative integer") from exc
 
 
+def _recall_preview_text(value: Any) -> str:
+    """Return a compact, single-line preview for the recall confirmation UI."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip() or "[无文字内容]"
+    if len(text) <= RECALL_PREVIEW_MAX_CHARS:
+        return text
+    return text[:RECALL_PREVIEW_MAX_CHARS] + "..."
+
+
+def _recall_candidate_payload(entry: Any) -> dict[str, Any] | None:
+    """Serialize one sent-store entry without exposing internal store details."""
+    message_id = str(getattr(entry, "messageid", "") or "").strip()
+    if not message_id:
+        return None
+    try:
+        sent_at_ms = int(getattr(entry, "sent_at_ms", 0) or 0)
+    except (TypeError, ValueError):
+        sent_at_ms = 0
+    return {
+        "message_id": message_id,
+        "preview": _recall_preview_text(getattr(entry, "digest", "")),
+        "sent_at_ms": sent_at_ms,
+    }
+
+
+def _latest_recall_candidate(sent_store: Any, canonical_chat_id: str) -> dict[str, Any] | None:
+    """Return the newest bot-sent message still eligible for recall."""
+    if sent_store is None or not canonical_chat_id:
+        return None
+    entries = sent_store.recent(canonical_chat_id, 1)
+    if not entries:
+        return None
+    return _recall_candidate_payload(entries[0])
+
+
 def _parse_terminal_dimension(raw: str, default: int, *, min_value: int, max_value: int) -> int:
     try:
         value = int(raw or default)
@@ -511,6 +546,8 @@ def _terminal_error_text(reason: str) -> str:
 def _account_for_sessiontracker_request(
     chat_type: int,
     code: str,
+    *,
+    admin_viewer_required: bool = False,
 ) -> tuple[InfoflowAccountAPI | None, str | None]:
     if chat_type in DM_CHAT_TYPES:
         try:
@@ -520,15 +557,16 @@ def _account_for_sessiontracker_request(
     if (
         (code or "").strip()
         and (
-            sessiontracker_full_user_message_enabled()
+            admin_viewer_required
+            or sessiontracker_full_user_message_enabled()
             or sessiontracker_terminal_enabled()
         )
         and infoflow_admin_users_from_env()
     ):
         try:
             return _read_infoflow_account(), None
-        except ValueError:
-            return None, None
+        except ValueError as exc:
+            return (None, str(exc)) if admin_viewer_required else (None, None)
     return None, None
 
 
@@ -596,7 +634,8 @@ async def _require_terminal_admin_user_id(
 
 _SESSIONTRACKER_CSS = """
 :root { --bg: #0c0c0c; --text: #d4d4d4; --muted: #6a737d; --accent: #58a6ff;
-  --user: #f0b67f; --hermes-border: #3d5a80; --ok: #3dd68c; --interim: #b48ead; }
+  --user: #f0b67f; --hermes-border: #3d5a80; --ok: #3dd68c; --interim: #b48ead;
+  --recall-dock-space: 84px; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg);
@@ -614,6 +653,7 @@ h1 { margin: 0; font-size: 14px; font-weight: 600; }
 .panel.active { display: flex; flex-direction: column; }
 #viewport { position: relative; flex: 1; min-height: 0; overflow: hidden; flex-direction: column; }
 #terminal-wrap { flex: 1; overflow-y: auto; padding: 12px 14px 48px; }
+#viewport.recall-visible #terminal-wrap { padding-bottom: var(--recall-dock-space); }
 .user-line { color: var(--user); margin: 14px 0 6px; white-space: pre-wrap; word-break: break-word; }
 .user-line .bullet { color: var(--user); font-weight: 600; margin-right: 6px; }
 .tool-line { color: #9cdcfe; white-space: pre-wrap; word-break: break-word; margin: 2px 0; }
@@ -641,6 +681,23 @@ h1 { margin: 0; font-size: 14px; font-weight: 600; }
   height: 44px; border-radius: 50%; border: 1px solid #444; background: #1f6feb; color: #fff;
   font-size: 20px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,.4); z-index: 10; }
 #scroll-bottom.visible { display: block; }
+body.recall-action-visible #scroll-bottom { bottom: var(--recall-dock-space); }
+.recall-dock { display: none; position: fixed; left: 50%; bottom: 16px;
+  transform: translateX(-50%); width: min(360px, calc(100vw - 28px)); z-index: 12; }
+.recall-dock.visible { display: block; }
+.recall-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px;
+  border: 1px solid #3d444d; border-radius: 8px; background: rgba(22, 27, 34, .97);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .55); max-height: calc(100vh - 32px);
+  overflow-y: auto; }
+.recall-panel[hidden], .recall-button[hidden] { display: none; }
+.recall-prompt { min-height: 20px; color: #f0f6fc; text-align: center;
+  white-space: pre-wrap; word-break: break-word; }
+.recall-button { width: 100%; min-height: 40px; border: 1px solid #6e3630;
+  border-radius: 6px; background: #21262d; color: #ff7b72; padding: 8px 12px;
+  font: inherit; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, .35); }
+.recall-button.confirm { border-color: #f85149; background: #da3633; color: #fff; }
+.recall-button.cancel { border-color: #3d444d; color: #d4d4d4; }
+.recall-button:disabled { opacity: .55; cursor: default; }
 .empty { color: var(--muted); padding: 24px; text-align: center; }
 body.layout-col { display: flex; flex-direction: column; height: 100vh; }
 #admin-terminal-panel { background: #0a0a0a; }
@@ -685,6 +742,14 @@ _SESSIONTRACKER_HTML = """<!DOCTYPE html>
 </header>
 <div id="viewport" class="panel active">
   <div id="terminal-wrap"><p class="empty" id="empty-hint">Waiting for session activity…</p></div>
+  <div id="recall-dock" class="recall-dock">
+    <button type="button" id="recall-open" class="recall-button">撤回最新一条消息</button>
+    <div id="recall-confirm-panel" class="recall-panel" role="group" aria-label="确认撤回消息" hidden>
+      <div id="recall-prompt" class="recall-prompt" aria-live="polite"></div>
+      <button type="button" id="recall-confirm" class="recall-button confirm">确认撤回</button>
+      <button type="button" id="recall-cancel" class="recall-button cancel">取消</button>
+    </div>
+  </div>
 </div>
 <div id="admin-terminal-panel" class="panel">
   <div id="terminal-toolbar">
@@ -715,6 +780,12 @@ const terminalNew = document.getElementById('terminal-new');
 const terminalDisconnect = document.getElementById('terminal-disconnect');
 const xtermHost = document.getElementById('xterm-host');
 const terminalFallback = document.getElementById('terminal-fallback');
+const recallDock = document.getElementById('recall-dock');
+const recallOpen = document.getElementById('recall-open');
+const recallConfirmPanel = document.getElementById('recall-confirm-panel');
+const recallPrompt = document.getElementById('recall-prompt');
+const recallConfirm = document.getElementById('recall-confirm');
+const recallCancel = document.getElementById('recall-cancel');
 let autoFollow = true;
 let sessionId = '';
 let lineCursor = 0;
@@ -722,6 +793,11 @@ let eventSource = null;
 let pollTimer = null;
 let gotTerminalLines = false;
 let adminTerminalAvailable = false;
+let adminRecallAvailable = false;
+let recallCandidate = null;
+let recallRequestToken = 0;
+let recallSubmitting = false;
+let recallLayoutFrame = 0;
 const SCROLL_THRESHOLD = 48;
 
 function nearBottom() {
@@ -754,6 +830,144 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function recallApiUrl() {
+  const qs = params.toString();
+  return apiBase + '/admin/recall/latest' + (qs ? '?' + qs : '');
+}
+
+function recallPromptText(candidate, prefix = '确认撤回') {
+  return prefix + String(candidate && candidate.preview ? candidate.preview : '[无文字内容]') + ' 消息';
+}
+
+function updateRecallLayout() {
+  const trackerActive = trackerPanel.classList.contains('active');
+  const shouldFollow = trackerActive && (autoFollow || nearBottom());
+  const visible = recallDock.classList.contains('visible');
+  const confirming = visible && !recallConfirmPanel.hidden;
+  trackerPanel.classList.toggle('recall-visible', visible);
+  trackerPanel.classList.toggle('recall-confirming', confirming);
+  document.body.classList.toggle('recall-action-visible', visible);
+  document.body.classList.toggle('recall-confirming', confirming);
+  const dockSpace = visible ? Math.ceil(recallDock.getBoundingClientRect().height + 28) : 84;
+  document.documentElement.style.setProperty('--recall-dock-space', dockSpace + 'px');
+  if (recallLayoutFrame) cancelAnimationFrame(recallLayoutFrame);
+  recallLayoutFrame = requestAnimationFrame(() => {
+    recallLayoutFrame = 0;
+    if (shouldFollow && trackerPanel.classList.contains('active')) {
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+    updateScrollButton();
+  });
+}
+
+if (window.ResizeObserver) {
+  new ResizeObserver(updateRecallLayout).observe(recallDock);
+}
+window.addEventListener('resize', updateRecallLayout);
+
+function closeRecallConfirmation() {
+  recallRequestToken += 1;
+  recallCandidate = null;
+  recallSubmitting = false;
+  recallOpen.hidden = false;
+  recallConfirmPanel.hidden = true;
+  recallConfirm.disabled = false;
+  recallCancel.disabled = false;
+  recallPrompt.textContent = '';
+  updateRecallLayout();
+}
+
+function updateRecallDockVisibility() {
+  const visible = adminRecallAvailable && trackerPanel.classList.contains('active');
+  recallDock.classList.toggle('visible', visible);
+  // Hiding the Tracker tab must not invalidate an in-flight recall.  The
+  // server request cannot be cancelled at that point, so preserve its state
+  // and show the eventual result when the viewer returns to the Tracker.
+  if (!visible && !recallSubmitting && !recallConfirmPanel.hidden) {
+    closeRecallConfirmation();
+  }
+  updateRecallLayout();
+}
+
+async function openRecallConfirmation() {
+  if (!adminRecallAvailable || recallSubmitting) return;
+  const token = ++recallRequestToken;
+  recallCandidate = null;
+  recallOpen.hidden = true;
+  recallConfirmPanel.hidden = false;
+  recallPrompt.textContent = '正在获取最新一条消息…';
+  recallConfirm.disabled = true;
+  recallCancel.disabled = false;
+  updateRecallLayout();
+  try {
+    const r = await fetch(recallApiUrl());
+    const data = await r.json().catch(() => ({}));
+    if (token !== recallRequestToken) return;
+    if (!r.ok) throw new Error(data.error || '获取待撤回消息失败');
+    recallCandidate = data.candidate || null;
+    if (!recallCandidate) {
+      recallPrompt.textContent = '当前会话没有可撤回的消息';
+      recallConfirm.disabled = true;
+      return;
+    }
+    recallPrompt.textContent = recallPromptText(recallCandidate);
+    recallConfirm.disabled = false;
+  } catch (err) {
+    if (token !== recallRequestToken) return;
+    recallPrompt.textContent = '获取待撤回消息失败：' +
+      (err && err.message ? err.message : err);
+    recallConfirm.disabled = true;
+  }
+}
+
+async function confirmLatestRecall() {
+  if (!recallCandidate || recallSubmitting) return;
+  const submitted = recallCandidate;
+  const token = ++recallRequestToken;
+  recallSubmitting = true;
+  recallPrompt.textContent = '正在撤回' + String(submitted.preview || '[无文字内容]') + ' 消息…';
+  recallConfirm.disabled = true;
+  recallCancel.disabled = true;
+  try {
+    const r = await fetch(recallApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message_id: String(submitted.message_id || '') })
+    });
+    const data = await r.json().catch(() => ({}));
+    if (token !== recallRequestToken) return;
+    if (r.ok && data.ok) {
+      recallSubmitting = false;
+      closeRecallConfirmation();
+      return;
+    }
+    if (r.status === 409 && data.candidate) {
+      recallCandidate = data.candidate;
+      recallPrompt.textContent = recallPromptText(
+        recallCandidate,
+        '最新消息已变化，请确认撤回'
+      );
+    } else if (r.status === 404) {
+      recallCandidate = null;
+      recallPrompt.textContent = '当前会话没有可撤回的消息';
+    } else {
+      recallPrompt.textContent = '撤回失败：' + (data.error || '如流接口返回错误');
+    }
+  } catch (err) {
+    if (token !== recallRequestToken) return;
+    recallPrompt.textContent = '撤回失败：' + (err && err.message ? err.message : err);
+  }
+  recallSubmitting = false;
+  recallConfirm.disabled = !recallCandidate;
+  recallCancel.disabled = false;
+}
+
+recallOpen.addEventListener('click', openRecallConfirmation);
+recallConfirm.addEventListener('click', confirmLatestRecall);
+recallCancel.addEventListener('click', () => {
+  if (!recallSubmitting) closeRecallConfirmation();
+});
+
 function selectTab(name) {
   const terminalActive = name === 'terminal' && adminTerminalAvailable;
   trackerPanel.classList.toggle('active', !terminalActive);
@@ -761,6 +975,7 @@ function selectTab(name) {
   tabTracker.classList.toggle('active', !terminalActive);
   tabTerminal.classList.toggle('active', terminalActive);
   scrollBtn.style.display = terminalActive ? 'none' : '';
+  updateRecallDockVisibility();
   if (terminalActive) {
     openTerminalPanel();
   }
@@ -1585,12 +1800,22 @@ function updateAdminTerminalAvailability(info) {
   }
 }
 
+function updateAdminRecallAvailability(info) {
+  adminRecallAvailable = !!(
+    info &&
+    info.viewer_is_admin &&
+    info.recall_enabled
+  );
+  updateRecallDockVisibility();
+}
+
 async function applyResolve(info) {
   const prev = sessionId;
   document.getElementById('title').textContent = info.label || 'Session Tracker';
   updateMetaLine(info);
   updateEmptyHint(info);
   updateAdminTerminalAvailability(info);
+  updateAdminRecallAvailability(info);
   if (!info.session_id) {
     sessionId = '';
     return;
@@ -1647,6 +1872,8 @@ def register_sessiontracker_routes(
     tracker: SessionTracker,
     *,
     base_path: str,
+    recall_sent_store: Any | None = None,
+    recall_message: Callable[[str, str], Awaitable[Any]] | None = None,
 ) -> None:
     """Mount Session Tracker routes on the webhook aiohttp app."""
     if not sessiontracker_enabled():
@@ -1654,6 +1881,39 @@ def register_sessiontracker_routes(
 
     base = base_path.rstrip("/")
     root = f"{base}/sessiontracker"
+    recall_backend_available = (
+        recall_sent_store is not None and callable(recall_message)
+    )
+    recall_locks: dict[str, asyncio.Lock] = {}
+
+    async def _admin_recall_target(
+        *,
+        chat_type: int,
+        chat_id: str,
+        code: str,
+    ) -> tuple[str, str | None, int]:
+        if not recall_backend_available:
+            return "", "recall is unavailable", 404
+        account, account_error = _account_for_sessiontracker_request(
+            chat_type,
+            code,
+            admin_viewer_required=True,
+        )
+        if account_error:
+            return "", account_error, 500
+        viewer_user_id = await _viewer_admin_user_id(code=code, account=account)
+        if not viewer_user_id:
+            return "", "recall requires admin viewer code", 403
+        if chat_type in GROUP_CHAT_TYPES:
+            return f"group:{chat_id.strip()}", None, 200
+        return viewer_user_id, None, 200
+
+    def _recall_lock(canonical_chat_id: str) -> asyncio.Lock:
+        lock = recall_locks.get(canonical_chat_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            recall_locks[canonical_chat_id] = lock
+        return lock
 
     @_require_sessiontracker_params
     async def page(request: Any, **kw: Any) -> Any:
@@ -1676,7 +1936,11 @@ def register_sessiontracker_routes(
         chat_type = kw["chat_type"]
         chat_id = kw["chat_id"]
         code = kw["code"]
-        account, account_error = _account_for_sessiontracker_request(chat_type, code)
+        account, account_error = _account_for_sessiontracker_request(
+            chat_type,
+            code,
+            admin_viewer_required=recall_backend_available,
+        )
         if account_error:
             return web.Response(status=500, text=account_error)
         try:
@@ -1699,6 +1963,7 @@ def register_sessiontracker_routes(
             viewer_is_admin=viewer_is_admin,
         )
         info["viewer_is_admin"] = viewer_is_admin
+        info["recall_enabled"] = viewer_is_admin and recall_backend_available
         info["terminal_enabled"] = terminal_block_reason is None
         info["terminal_block_reason"] = terminal_block_reason
         return web.json_response(info)
@@ -1863,6 +2128,182 @@ def register_sessiontracker_routes(
                 show_full_user_message=show_full_user_message,
             ),
         })
+
+    @_require_sessiontracker_params
+    async def api_admin_recall_latest(request: Any, **kw: Any) -> Any:
+        from aiohttp import web
+
+        canonical, error, status = await _admin_recall_target(
+            chat_type=kw["chat_type"],
+            chat_id=kw["chat_id"],
+            code=kw["code"],
+        )
+        if error:
+            return web.json_response(
+                {"error": error},
+                status=status,
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            candidate = _latest_recall_candidate(recall_sent_store, canonical)
+        except Exception:
+            logger.exception(
+                "[infoflow] sessiontracker recall candidate lookup failed target=%s",
+                canonical,
+            )
+            return web.json_response(
+                {"error": "failed to look up latest message"},
+                status=500,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(
+            {"available": candidate is not None, "candidate": candidate},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @_require_sessiontracker_params
+    async def api_admin_recall_confirm(request: Any, **kw: Any) -> Any:
+        from aiohttp import web
+
+        canonical, error, status = await _admin_recall_target(
+            chat_type=kw["chat_type"],
+            chat_id=kw["chat_id"],
+            code=kw["code"],
+        )
+        if error:
+            return web.json_response(
+                {"error": error},
+                status=status,
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response(
+                {"error": "JSON body required"},
+                status=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"error": "JSON body must be an object"},
+                status=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        message_id = str(body.get("message_id") or "").strip()
+        if not message_id:
+            return web.json_response(
+                {"error": "message_id required"},
+                status=400,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        async with _recall_lock(canonical):
+            try:
+                candidate = _latest_recall_candidate(recall_sent_store, canonical)
+            except Exception:
+                logger.exception(
+                    "[infoflow] sessiontracker recall candidate lookup failed target=%s",
+                    canonical,
+                )
+                return web.json_response(
+                    {"error": "failed to look up latest message"},
+                    status=500,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if candidate is None:
+                return web.json_response(
+                    {"error": "no recent bot messages to recall", "candidate": None},
+                    status=404,
+                    headers={"Cache-Control": "no-store"},
+                )
+            if candidate["message_id"] != message_id:
+                return web.json_response(
+                    {
+                        "error": "latest message changed; confirmation required",
+                        "candidate": candidate,
+                    },
+                    status=409,
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            try:
+                recall_callback = recall_message
+                if recall_callback is None:
+                    return web.json_response(
+                        {"error": "recall is unavailable"},
+                        status=404,
+                        headers={"Cache-Control": "no-store"},
+                    )
+                result = await recall_callback(canonical, message_id)
+            except Exception as exc:
+                logger.exception(
+                    "[infoflow] sessiontracker recall request failed target=%s message_id=%s",
+                    canonical,
+                    message_id,
+                )
+                return web.json_response(
+                    {"error": str(exc) or "recall failed"},
+                    status=502,
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            success = (
+                bool(result.get("success"))
+                if isinstance(result, dict)
+                else bool(getattr(result, "success", False))
+            )
+            result_error = (
+                str(result.get("error") or "")
+                if isinstance(result, dict)
+                else str(getattr(result, "error", "") or "")
+            )
+            if not success:
+                logger.warning(
+                    "[infoflow] sessiontracker recall rejected target=%s message_id=%s error=%s",
+                    canonical,
+                    message_id,
+                    result_error or "recall failed",
+                )
+                return web.json_response(
+                    {"error": result_error or "recall failed"},
+                    status=502,
+                    headers={"Cache-Control": "no-store"},
+                )
+
+            # The adapter callback removes successful recalls from this same
+            # store. Keep the route contract robust for alternate callbacks and
+            # tests by making the removal idempotently explicit here as well.
+            try:
+                recall_sent_store.remove(canonical, message_id)
+            except Exception:
+                logger.debug(
+                    "sessiontracker recall store remove failed",
+                    exc_info=True,
+                )
+            try:
+                next_candidate = _latest_recall_candidate(recall_sent_store, canonical)
+            except Exception:
+                next_candidate = None
+                logger.warning(
+                    "[infoflow] sessiontracker next recall candidate lookup failed target=%s",
+                    canonical,
+                    exc_info=True,
+                )
+            logger.info(
+                "[infoflow] sessiontracker recall success target=%s message_id=%s remote=%s",
+                canonical,
+                message_id,
+                getattr(request, "remote", "") or "",
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "recalled": candidate,
+                    "candidate": next_candidate,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
 
     @_require_sessiontracker_params
     async def api_admin_terminal_sessions(request: Any, **kw: Any) -> Any:
@@ -2257,6 +2698,8 @@ def register_sessiontracker_routes(
     app.router.add_get(f"{root}/api/resolve", api_resolve)
     app.router.add_get(f"{root}/api/history", api_history)
     app.router.add_get(f"{root}/api/stream", api_stream)
+    app.router.add_get(f"{root}/api/admin/recall/latest", api_admin_recall_latest)
+    app.router.add_post(f"{root}/api/admin/recall/latest", api_admin_recall_confirm)
     app.router.add_get(f"{root}/api/admin/terminal/sessions", api_admin_terminal_sessions)
     app.router.add_post(f"{root}/api/admin/terminal/sessions", api_admin_terminal_new)
     app.router.add_post(

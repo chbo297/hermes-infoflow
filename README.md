@@ -329,12 +329,12 @@ http://127.0.0.1:26521/webhook/infoflow/dashboard
 
 ## Session Tracker（终端风格实时视图）
 
-在 webhook 同一端口上提供 **可通过反代访问** 的只读 Web UI，按群或私聊目标跟踪单个 Hermes session，以 CLI 风格终端展示 tool 行、Hermes 回复框与状态行。
+在 webhook 同一端口上提供 **可通过反代访问** 的 Web UI，按群或私聊目标跟踪单个 Hermes session，以 CLI 风格终端展示 tool 行、Hermes 回复框与状态行。普通访问者只读；通过 `code` 验证的管理员还可撤回机器人最近发出的消息。
 
 ### 访问地址
 
 ```
-/webhook/infoflow/sessiontracker?chatType=2|3|5|6&chatId=<群ID>
+/webhook/infoflow/sessiontracker?chatType=2|3|5|6&chatId=<群ID>[&code=<查看者code>]
 /webhook/infoflow/sessiontracker?chatType=1|7&chatId=<占位>&code=<私聊code>
 ```
 
@@ -344,7 +344,7 @@ http://127.0.0.1:26521/webhook/infoflow/dashboard
 https://<your-domain>/webhook/infoflow/sessiontracker?chatType=7&chatId=3950087625&code=2cecba82ba9686cb75596bfbe5637f03
 ```
 
-- `chatType=2/3/5/6`：群聊，`chatId` 为群号 → 目标 `group:{chatId}`
+- `chatType=2/3/5/6`：群聊，`chatId` 为群号 → 目标 `group:{chatId}`；只读展示可不带 `code`，管理员功能必须带查看者 `code`
 - `chatType=1/7`：私聊，必须带 `code`；插件调用 Infoflow `getuserinfo` 解析为 uuap（`UserId`）作为 DM 目标
 
 详见 [docs/infoflow-getuserinfo-api.md](docs/infoflow-getuserinfo-api.md)。
@@ -365,7 +365,7 @@ https://<your-domain>/webhook/infoflow/sessiontracker?chatType=7&chatId=39500876
 | | Dashboard | Session Tracker |
 |---|-----------|-----------------|
 | 路径 | `{WEBHOOK_PATH}/dashboard` | `{WEBHOOK_PATH}/sessiontracker` |
-| 访问 | 仅 localhost | 可经反代（`code_auth`：私聊需有效 code） |
+| 访问 | 仅 localhost | 可经反代（私聊及管理员操作需有效 `code`） |
 | 视图 | Session 列表 + 事件时间线 | 单目标 CLI 终端 + 自动滚动 |
 
 ### 展示粒度
@@ -394,6 +394,8 @@ https://<your-domain>/webhook/infoflow/sessiontracker?chatType=7&chatId=39500876
 调试注入到 Hermes 的完整 user message：`INFOFLOW_SESSIONTRACKER_FULL_USER_MESSAGE=true`。只有 Session Tracker URL 中的 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 时才展示完整内容；非 admin 或未带 `code` 的群聊页面仍只展示 `[Message]` 后正文。
 
 私聊 admin 终端：`INFOFLOW_SESSIONTRACKER_TERMINAL_ENABLED=true` 后，只有 `chatType=1|7` 且 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 的页面会显示 `Terminal` tab。该 tab 可同时保留最多 4 个 PTY session；关闭页面、刷新页面、断网只会断开浏览器传输层，PTY 默认继续保留 48 小时，再次打开会列出并复用已有 session。桌面端优先使用 WebSocket，移动端优先使用 HTTP polling 并在后台静默尝试升级到 WebSocket。点击断开图标会关闭当前 PTY。群聊页面不显示该 tab。
+
+管理员撤回：私聊和群聊页面的 `code` 解析为 `INFOFLOW_ADMIN_USER` 中任一 userid 时，Tracker 底部显示“撤回最新一条消息”悬浮按钮。点击后先冻结当前最新一条机器人消息，并显示最多 20 个字符的确认文案；只有再点击“确认撤回”才会调用如流撤回接口，“取消”不会发起请求。每次只撤回一条，成功后该消息从 recent-sent 记录中移除，因此再次操作会依次撤回更早的消息。服务端会在每次预览和确认时重新校验管理员身份、当前聊天目标及冻结的消息 ID，并串行处理同一聊天的请求。
 
 关闭：`INFOFLOW_SESSIONTRACKER_ENABLED=false`。
 

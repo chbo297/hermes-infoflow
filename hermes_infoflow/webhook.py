@@ -20,6 +20,7 @@ from .utils import gw_log
 if TYPE_CHECKING:
     from .dashboard import SessionTracker
     from .itypes import IncomingMessage
+    from .sent_store import SentMessageStore
     from .serverapi import ServerAPI
 
 
@@ -268,10 +269,14 @@ class WebhookServer:
         on_message: Callable[[IncomingMessage], Awaitable[None]],
         task_set: set[asyncio.Task[Any]] | None = None,
         tracker: SessionTracker | None = None,
+        recall_sent_store: SentMessageStore | None = None,
+        recall_message: Callable[[str, str], Awaitable[Any]] | None = None,
     ) -> None:
         self._serverapi = serverapi
         self._sent_message_ids = sent_message_ids
         self._tracker = tracker
+        self._recall_sent_store = recall_sent_store
+        self._recall_message = recall_message
         self._webhook_path = webhook_path
         self._host = host
         self._port = port
@@ -298,7 +303,11 @@ class WebhookServer:
                 register_routes(app, self._tracker, base_path=self._webhook_path)
             if sessiontracker_enabled():
                 register_sessiontracker_routes(
-                    app, self._tracker, base_path=self._webhook_path,
+                    app,
+                    self._tracker,
+                    base_path=self._webhook_path,
+                    recall_sent_store=self._recall_sent_store,
+                    recall_message=self._recall_message,
                 )
         self._runner = web.AppRunner(app)
         await self._runner.setup()

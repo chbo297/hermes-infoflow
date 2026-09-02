@@ -8,8 +8,18 @@ versioning (with prerelease suffixes such as `0.1.0b1` for betas).
 
 ## [Unreleased]
 
+### Added
+
+- Add an admin-only Session Tracker action for recalling the latest bot-sent
+  Infoflow message in direct messages and groups, with an explicit preview and
+  confirmation step plus per-chat concurrency protection.
+
 ### Fixed
 
+- Make recent sent-message lookup merge live memory with newer cross-process
+  SQLite records, propagate cross-process recall tombstones, prefer Infoflow's
+  group message sequence, and deterministically order exact ties, so
+  latest-message recall selects the true newest unrecalled message.
 - Suppress exhausted provider streaming/connection error replies in both
   Infoflow groups and direct messages, forward one deduplicated diagnostic per
   inbound turn to `INFOFLOW_OP_CHANNEL`, and keep the source chat silent even

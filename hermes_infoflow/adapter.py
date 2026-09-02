@@ -795,6 +795,8 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             on_message=self._on_inbound_message,
             task_set=self._background_tasks,
             tracker=self._tracker,
+            recall_sent_store=self._sent_store,
+            recall_message=self.delete_message,
         )
         self._websocket_receiver = WebSocketReceiver(
             serverapi=self._serverapi,

@@ -66,6 +66,14 @@ class SentMessage:
     sent_at_ms: int = 0
 
 
+def _message_order_key(entry: SentMessage) -> tuple[int, int, int]:
+    """Prefer Infoflow's group sequence over local response-completion time."""
+    seq = (entry.msgseqid or "").strip()
+    if entry.chat_id.startswith("group:") and seq.isascii() and seq.isdigit():
+        return 1, int(seq), entry.sent_at_ms
+    return 0, entry.sent_at_ms, 0
+
+
 @dataclass
 class SentMessageStore:
     """Combined "recent sent" buffer and dedup membership set.
@@ -196,25 +204,28 @@ class SentMessageStore:
         if count <= 0:
             return []
         merged: dict[str, SentMessage] = {}
+        # Insert persisted rows first so Python's stable sort preserves the
+        # SQLite ordering for exact ties, then merge in-memory-only fallbacks.
+        for db_entry in self._db_recent(chat_id, count):
+            if db_entry.messageid not in merged:
+                merged[db_entry.messageid] = db_entry
         buf = self._entries.get(chat_id)
         if buf:
+            deleted_ids = self._db_deleted_messageids(
+                chat_id,
+                [entry.messageid for entry in buf],
+            )
             for entry in reversed(buf):
-                if entry.messageid not in merged:
+                if entry.messageid not in deleted_ids and entry.messageid not in merged:
                     merged[entry.messageid] = entry
-                if len(merged) >= count:
-                    return list(merged.values())[:count]
-        for db_entry in self._db_recent(chat_id, count):
-            if db_entry.messageid in merged:
-                continue
-            merged[db_entry.messageid] = db_entry
-            if len(merged) >= count:
-                break
-        ordered = sorted(merged.values(), key=lambda e: e.sent_at_ms, reverse=True)
+        ordered = sorted(merged.values(), key=_message_order_key, reverse=True)
         return ordered[:count]
 
     def find(self, chat_id: str, messageid: str) -> SentMessage | None:
         """Return the matching sent entry (or None) for ``messageid`` on ``chat_id``."""
         if not messageid:
+            return None
+        if messageid in self._db_deleted_messageids(chat_id, [messageid]):
             return None
         buf = self._entries.get(chat_id)
         if buf:
@@ -229,7 +240,11 @@ class SentMessageStore:
             return None
         for buf in self._entries.values():
             for entry in reversed(buf):
-                if entry.messageid == messageid:
+                if (
+                    entry.messageid == messageid
+                    and messageid
+                    not in self._db_deleted_messageids(entry.chat_id, [messageid])
+                ):
                     return entry
         return self._db_find_any(messageid)
 
@@ -345,6 +360,17 @@ class SentMessageStore:
                     "CREATE INDEX IF NOT EXISTS idx_chat_sent "
                     "ON sent_messages(account_id, chat_id, sent_at DESC)"
                 )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS sent_message_deletions (
+                        account_id  TEXT NOT NULL,
+                        chat_id     TEXT NOT NULL,
+                        messageid   TEXT NOT NULL,
+                        deleted_at  INTEGER NOT NULL,
+                        PRIMARY KEY (account_id, chat_id, messageid)
+                    )
+                    """
+                )
                 self._db_initialized = True
             except sqlite3.Error as exc:
                 # Idempotent CREATE IF NOT EXISTS: if a peer already created
@@ -364,10 +390,15 @@ class SentMessageStore:
             if conn is None:
                 return
             try:
+                # Infoflow message IDs are unique.  A record arriving after a
+                # recall tombstone is delayed/duplicate bookkeeping, never a
+                # legitimate ID reuse, so it must not resurrect the message.
                 conn.execute(
                     "INSERT INTO sent_messages "
                     "(account_id, chat_id, messageid, msgseqid, digest, sent_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                    "SELECT 1 FROM sent_message_deletions WHERE account_id = ? "
+                    "AND chat_id = ? AND messageid = ?)",
                     (
                         self.account_id,
                         entry.chat_id,
@@ -375,6 +406,9 @@ class SentMessageStore:
                         entry.msgseqid,
                         entry.digest,
                         entry.sent_at_ms,
+                        self.account_id,
+                        entry.chat_id,
+                        entry.messageid,
                     ),
                 )
                 # Best-effort retention sweep. We anchor the cutoff to the
@@ -400,10 +434,27 @@ class SentMessageStore:
             if conn is None:
                 return []
             try:
+                group_sequence_order = ""
+                if chat_id.startswith("group:"):
+                    group_sequence_order = (
+                        "CASE WHEN sm.msgseqid <> '' "
+                        "AND sm.msgseqid NOT GLOB '*[^0-9]*' "
+                        "THEN 1 ELSE 0 END DESC, "
+                        "CASE WHEN sm.msgseqid <> '' "
+                        "AND sm.msgseqid NOT GLOB '*[^0-9]*' "
+                        "THEN length(ltrim(sm.msgseqid, '0')) ELSE 0 END DESC, "
+                        "CASE WHEN sm.msgseqid <> '' "
+                        "AND sm.msgseqid NOT GLOB '*[^0-9]*' "
+                        "THEN ltrim(sm.msgseqid, '0') ELSE '' END DESC, "
+                    )
                 cur = conn.execute(
-                    "SELECT chat_id, messageid, msgseqid, digest, sent_at "
-                    "FROM sent_messages WHERE account_id = ? AND chat_id = ? "
-                    "ORDER BY sent_at DESC LIMIT ?",
+                    "SELECT sm.chat_id, sm.messageid, sm.msgseqid, sm.digest, "
+                    "sm.sent_at FROM sent_messages AS sm "
+                    "WHERE sm.account_id = ? AND sm.chat_id = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM sent_message_deletions AS d "
+                    "WHERE d.account_id = sm.account_id AND d.chat_id = sm.chat_id "
+                    "AND d.messageid = sm.messageid) "
+                    f"ORDER BY {group_sequence_order}sm.sent_at DESC, sm.id DESC LIMIT ?",
                     (self.account_id, chat_id, count),
                 )
                 return [
@@ -432,9 +483,12 @@ class SentMessageStore:
                 return None
             try:
                 cur = conn.execute(
-                    "SELECT chat_id, messageid, msgseqid, digest, sent_at "
-                    "FROM sent_messages WHERE account_id = ? AND chat_id = ? "
-                    "AND messageid = ? LIMIT 1",
+                    "SELECT sm.chat_id, sm.messageid, sm.msgseqid, sm.digest, "
+                    "sm.sent_at FROM sent_messages AS sm "
+                    "WHERE sm.account_id = ? AND sm.chat_id = ? AND sm.messageid = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM sent_message_deletions AS d "
+                    "WHERE d.account_id = sm.account_id AND d.chat_id = sm.chat_id "
+                    "AND d.messageid = sm.messageid) LIMIT 1",
                     (self.account_id, chat_id, messageid),
                 )
                 row = cur.fetchone()
@@ -463,8 +517,12 @@ class SentMessageStore:
                 return None
             try:
                 cur = conn.execute(
-                    "SELECT chat_id, messageid, msgseqid, digest, sent_at "
-                    "FROM sent_messages WHERE account_id = ? AND messageid = ? LIMIT 1",
+                    "SELECT sm.chat_id, sm.messageid, sm.msgseqid, sm.digest, "
+                    "sm.sent_at FROM sent_messages AS sm "
+                    "WHERE sm.account_id = ? AND sm.messageid = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM sent_message_deletions AS d "
+                    "WHERE d.account_id = sm.account_id AND d.chat_id = sm.chat_id "
+                    "AND d.messageid = sm.messageid) LIMIT 1",
                     (self.account_id, messageid),
                 )
                 row = cur.fetchone()
@@ -484,6 +542,39 @@ class SentMessageStore:
                 with contextlib.suppress(sqlite3.Error):
                     conn.close()
 
+    def _db_deleted_messageids(
+        self,
+        chat_id: str,
+        messageids: Iterable[str],
+    ) -> set[str]:
+        if self.db_path is None:
+            return set()
+        unique_ids = tuple(dict.fromkeys(mid for mid in messageids if mid))
+        if not unique_ids:
+            return set()
+        placeholders = ", ".join("?" for _ in unique_ids)
+        with self._db_lock:
+            conn = self._ensure_db()
+            if conn is None:
+                return set()
+            try:
+                cur = conn.execute(
+                    "SELECT messageid FROM sent_message_deletions "
+                    "WHERE account_id = ? AND chat_id = ? "
+                    f"AND messageid IN ({placeholders})",
+                    (self.account_id, chat_id, *unique_ids),
+                )
+                return {str(row[0]) for row in cur.fetchall()}
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "[infoflow:sent_store] db deletion lookup failed: %s",
+                    exc,
+                )
+                return set()
+            finally:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.close()
+
     def _db_delete(self, chat_id: str, messageid: str) -> None:
         if self.db_path is None:
             return
@@ -492,6 +583,17 @@ class SentMessageStore:
             if conn is None:
                 return
             try:
+                deleted_at_ms = int(time.time() * 1000)
+                # Write the tombstone first. Readers exclude the entry even if
+                # the physical row deletion is delayed or another process has
+                # a stale in-memory copy.
+                conn.execute(
+                    "INSERT INTO sent_message_deletions "
+                    "(account_id, chat_id, messageid, deleted_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(account_id, chat_id, messageid) DO UPDATE SET "
+                    "deleted_at = excluded.deleted_at",
+                    (self.account_id, chat_id, messageid, deleted_at_ms),
+                )
                 conn.execute(
                     "DELETE FROM sent_messages WHERE account_id = ? AND chat_id = ? "
                     "AND messageid = ?",
