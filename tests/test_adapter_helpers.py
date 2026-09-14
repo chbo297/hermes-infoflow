@@ -821,11 +821,20 @@ def test_read_settings_invalid_follow_up_window_defaults(monkeypatch) -> None:
 def test_read_settings_parses_groups_json(monkeypatch) -> None:
     monkeypatch.setenv(
         "INFOFLOW_GROUPS",
-        json.dumps({"42": {"reply_mode": "ignore", "watch_regex": ["x"]}}),
+        json.dumps(
+            {
+                "42": {
+                    "reply_mode": "ignore",
+                    "watch_regex": ["x"],
+                    "recall_group_id": "24",
+                }
+            }
+        ),
     )
     s = _read_account_settings(_cfg())
     assert s["groups"]["42"]["reply_mode"] == "ignore"
     assert s["groups"]["42"]["watch_regex"] == ["x"]
+    assert s["groups"]["42"]["recall_group_id"] == "24"
 
 
 def test_read_settings_ignores_malformed_groups_json(monkeypatch, caplog) -> None:

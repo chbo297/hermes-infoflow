@@ -144,7 +144,7 @@ optional_env:
     prompt: "Idle session reset seconds"
     password: false
   - name: INFOFLOW_GROUPS
-    description: "Per-group config overrides as JSON, keyed by group ID. Each entry can override reply_mode / watch_mentions / watch_regex / follow_up / follow_up_window / system_prompt."
+    description: "Per-group config overrides as JSON, keyed by webhook group ID. Each entry can override reply_mode / watch_mentions / watch_regex / follow_up / follow_up_window / system_prompt, and recall_group_id can map to the ID required by the recall API."
     prompt: "Per-group config (JSON)"
     password: false
   - name: INFOFLOW_ALLOWED_USERS
