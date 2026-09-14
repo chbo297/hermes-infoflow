@@ -732,12 +732,22 @@ def make_plugin_hooks(tracker: SessionTracker) -> dict[str, Callable[..., Any]]:
     # the older display.tool_line to avoid two lines per tool.
     _tool_progress_started: dict[str, set[str]] = {}
 
+    # Upstream (v2026.9.14+) fires native stream hooks with a leaner kwarg set
+    # (delta, kind, session_id, model, surface, turn_id) and NO cumulative
+    # message_so_far / per-delta final flag. We accumulate per session here and
+    # translate into the rich kwargs the on_stream_delta handler below expects;
+    # the final flush happens from the native on_stream_end hook.
+    _native_text_acc: dict[str, str] = {}
+    _native_think_acc: dict[str, str] = {}
+
     def _drop_session_state(sid: str) -> None:
         _stream_state.pop(sid, None)
         for key in [key for key in _thinking_state if key[0] == sid]:
             _thinking_state.pop(key, None)
         _last_streamed_text.pop(sid, None)
         _tool_progress_started.pop(sid, None)
+        _native_text_acc.pop(sid, None)
+        _native_think_acc.pop(sid, None)
 
     def _safe(fn: Callable[..., Any]) -> Callable[..., Any]:
         def wrapper(**kwargs: Any) -> None:
@@ -1321,6 +1331,77 @@ def make_plugin_hooks(tracker: SessionTracker) -> dict[str, Callable[..., Any]]:
             model=str(kw.get("model") or ""),
         )
 
+    @_safe
+    def _native_on_stream_start(**kw: Any) -> None:
+        sid = kw.get("session_id") or ""
+        if not sid:
+            return
+        _native_text_acc.pop(sid, None)
+        _native_think_acc.pop(sid, None)
+
+    @_safe
+    def _native_on_stream_delta(**kw: Any) -> None:
+        # Translate upstream-native (delta, kind, surface, turn_id) into the rich
+        # kwargs the on_stream_delta handler expects, accumulating cumulative text.
+        sid = kw.get("session_id") or ""
+        if not sid:
+            return
+        delta = kw.get("delta") or ""
+        if not delta:
+            return
+        content_type = "thinking" if str(kw.get("kind") or "text") == "reasoning" else "text"
+        acc = _native_think_acc if content_type == "thinking" else _native_text_acc
+        text_so_far = (acc.get(sid) or "") + str(delta)
+        acc[sid] = text_so_far
+        on_stream_delta(
+            session_id=sid,
+            platform=kw.get("surface"),
+            model=kw.get("model"),
+            delta_text=str(delta),
+            content_type=content_type,
+            message_so_far=text_so_far,
+            stream_id=str(kw.get("turn_id") or ""),
+            final=False,
+        )
+
+    @_safe
+    def _native_on_stream_end(**kw: Any) -> None:
+        # Segment boundary: flush whichever accumulators hold content as final.
+        sid = kw.get("session_id") or ""
+        if not sid:
+            return
+        stream_id = str(kw.get("turn_id") or "")
+        for content_type, acc in (("thinking", _native_think_acc), ("text", _native_text_acc)):
+            text = acc.pop(sid, "")
+            if content_type == "text" and not text:
+                text = kw.get("final_text") or ""
+            if not text:
+                continue
+            on_stream_delta(
+                session_id=sid,
+                platform=kw.get("surface"),
+                model=kw.get("model"),
+                delta_text="",
+                content_type=content_type,
+                message_so_far=text,
+                stream_id=stream_id,
+                final=True,
+            )
+
+    @_safe
+    def _native_on_interim_message(**kw: Any) -> None:
+        sid = kw.get("session_id") or ""
+        if not sid:
+            return
+        on_interim_assistant(
+            session_id=sid,
+            message_text=kw.get("text") or "",
+            reason="",
+            already_streamed=bool(kw.get("already_streamed")),
+            platform=kw.get("surface"),
+            model=kw.get("model"),
+        )
+
     return {
         "on_session_start": on_session_start,
         "on_session_end": on_session_end,
@@ -1333,9 +1414,13 @@ def make_plugin_hooks(tracker: SessionTracker) -> dict[str, Callable[..., Any]]:
         "post_api_request": post_api_request,
         "post_gateway_session_resolved": post_gateway_session_resolved,
         "pre_gateway_dispatch": pre_gateway_dispatch,
-        "on_stream_delta": on_stream_delta,
-        "on_tool_progress": on_tool_progress,
-        "on_interim_assistant": on_interim_assistant,
+        # Upstream-native streaming hooks translated into the infoflow display
+        # events (on_tool_progress is intentionally dropped — post_tool_call
+        # already renders a tool line, so the dashboard degrades gracefully).
+        "on_stream_start": _native_on_stream_start,
+        "on_stream_delta": _native_on_stream_delta,
+        "on_stream_end": _native_on_stream_end,
+        "on_interim_message": _native_on_interim_message,
     }
 
 
