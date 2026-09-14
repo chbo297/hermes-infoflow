@@ -2493,6 +2493,45 @@ class ServerAPI:
     # Recall — group
     # ------------------------------------------------------------------
 
+    def _recall_api_group_id(self, group_id: str) -> str:
+        """Resolve the group ID expected by Infoflow's recall endpoint.
+
+        Some Infoflow webhook payloads identify a group with a long
+        conversation ID while the legacy group recall API accepts only the
+        group's shorter ID.  Keep the webhook ID as the canonical local chat
+        key and apply the optional per-group mapping only at this API boundary.
+        """
+        source_group_id = str(group_id or "").strip()
+        groups = self._settings.get("groups")
+        group_settings = (
+            groups.get(source_group_id, {}) if isinstance(groups, dict) else {}
+        )
+        if not isinstance(group_settings, dict):
+            return source_group_id
+
+        mapped_group_id = group_settings.get("recall_group_id")
+        if mapped_group_id in (None, ""):
+            mapped_group_id = group_settings.get("recallGroupId")
+        if mapped_group_id in (None, ""):
+            return source_group_id
+
+        mapped_group_id = str(mapped_group_id).strip()
+        if not mapped_group_id.isdigit() or int(mapped_group_id) <= 0:
+            logger.warning(
+                "[serverapi] ignoring invalid recall_group_id=%r for group=%s",
+                mapped_group_id,
+                source_group_id,
+            )
+            return source_group_id
+
+        if mapped_group_id != source_group_id:
+            logger.info(
+                "[serverapi] recall group id mapped inbound=%s api=%s",
+                source_group_id,
+                mapped_group_id,
+            )
+        return mapped_group_id
+
     async def recall_group_message(
         self,
         group_id: str,
@@ -2506,7 +2545,7 @@ class ServerAPI:
             try:
                 res = await _api.recall_group_message(
                     self._api_account,
-                    group_id=int(group_id),
+                    group_id=int(self._recall_api_group_id(group_id)),
                     messageid=message_id,
                     msgseqid=msgseqid,
                     session=sess,

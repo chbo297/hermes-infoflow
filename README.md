@@ -224,7 +224,7 @@ bash scripts/deploy.sh --port 9000 # 指定 webhook 端口并写入 ~/.hermes/.e
 | `INFOFLOW_OUTBOUND_MENTION_BLACKLIST` | 无 | 外发直接 @ 黑名单，逗号分隔 `user:<uuapName>` / `bot:<agentId>`；只影响机器人发群消息时的具体 @，不影响 `@all`、入站触发或处理中表情 |
 | `INFOFLOW_FOLLOW_UP` | `true` | 机器人回复后群聊 follow-up 窗口是否开启 |
 | `INFOFLOW_FOLLOW_UP_WINDOW` | `300` | follow-up 窗口秒数 |
-| `INFOFLOW_GROUPS` | 无 | 按群 ID 的 JSON 配置覆盖 |
+| `INFOFLOW_GROUPS` | 无 | 按 webhook 群 ID 的 JSON 配置覆盖；可用 `recall_group_id` 指定撤回 API 所需的另一群 ID |
 | `INFOFLOW_ADMIN_USER` | 无 | 管理员 userid，支持英文逗号分隔多个（只用于权限判定，不接收运维通知） |
 | `INFOFLOW_ALLOWED_USERS` | 无 | 逗号分隔的 uuapName allowlist |
 | `INFOFLOW_ALLOW_ALL_USERS` | `false` | 允许所有人（仅开发） |
@@ -461,6 +461,19 @@ ingress:
 // 不传 message_id，自动撤回最近 N 条
 { "target": "alice", "count": 1 }
 ```
+
+若入站 webhook 使用长会话群 ID，而如流撤回接口只接受该群的短 ID，可在群配置中显式映射：
+
+```yaml
+platforms:
+  infoflow:
+    extra:
+      groups:
+        "24978967504":
+          recall_group_id: "24405109"
+```
+
+配置键仍是 webhook 收到的群 ID；映射只作用于撤回 API 请求，不改变本地会话、消息历史或发送目标。撤回请求直接访问 `INFOFLOW_API_HOST`，不经过本机 webhook 地址、Session Tracker 或网关转发。
 
 ⚠️ **跨进程撤回**：自 v0.2.0 起，出站消息默认写入 `~/.hermes/state/infoflow/sent-messages.db`（可用 `HERMES_STATE_DIR` 覆盖），cron 子进程与 gateway 共享 `count` 撤回。若 SQLite 不可用则回退为 gateway 进程内内存 ring buffer。
 

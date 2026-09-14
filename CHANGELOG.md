@@ -16,6 +16,9 @@ versioning (with prerelease suffixes such as `0.1.0b1` for betas).
 
 ### Fixed
 
+- Allow each webhook group ID to map to the short group ID required by the
+  Infoflow recall API, without changing local chat keys or coupling recall to
+  the webhook listener, Session Tracker, gateway, or machine IP.
 - Make recent sent-message lookup merge live memory with newer cross-process
   SQLite records, propagate cross-process recall tombstones, prefer Infoflow's
   group message sequence, and deterministically order exact ties, so
