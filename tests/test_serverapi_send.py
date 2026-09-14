@@ -60,6 +60,81 @@ def _settings() -> dict[str, object]:
     }
 
 
+def test_recall_group_message_maps_webhook_group_id_for_api(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_recall_group_message(
+        account, *, group_id, messageid, msgseqid, session=None
+    ):
+        captured.update(
+            group_id=group_id,
+            messageid=messageid,
+            msgseqid=msgseqid,
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "recall_group_message",
+        fake_recall_group_message,
+    )
+    settings = _settings()
+    settings["groups"] = {
+        "24978967504": {"recall_group_id": "24405109"},
+    }
+
+    result = asyncio.run(
+        ServerAPI(settings=settings).recall_group_message(
+            "24978967504",
+            "1876125714793756559",
+            "300021647",
+            session=object(),
+        )
+    )
+
+    assert result.success is True
+    assert captured == {
+        "group_id": 24405109,
+        "messageid": "1876125714793756559",
+        "msgseqid": "300021647",
+    }
+
+
+def test_recall_group_message_ignores_invalid_group_id_mapping(
+    monkeypatch, caplog
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_recall_group_message(
+        account, *, group_id, messageid, msgseqid, session=None
+    ):
+        captured["group_id"] = group_id
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        serverapi_mod._api,
+        "recall_group_message",
+        fake_recall_group_message,
+    )
+    settings = _settings()
+    settings["groups"] = {
+        "24978967504": {"recall_group_id": "not-a-group-id"},
+    }
+
+    result = asyncio.run(
+        ServerAPI(settings=settings).recall_group_message(
+            "24978967504",
+            "message-id",
+            "sequence-id",
+            session=object(),
+        )
+    )
+
+    assert result.success is True
+    assert captured["group_id"] == 24978967504
+    assert "ignoring invalid recall_group_id" in caplog.text
+
+
 def test_send_private_message_intent_success_uses_private_response_only(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
