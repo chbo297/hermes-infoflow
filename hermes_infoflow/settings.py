@@ -652,7 +652,7 @@ def _parse_infoflow_target(
 ) -> tuple[str, str | None] | None:
     """Parse an infoflow target reference into ``(chat_id, thread_id)``.
 
-    This is registered as ``PlatformEntry.target_parse_fn`` so that
+    This is registered as ``PlatformEntry.parse_target_ref_fn`` so that
     ``tools/send_message_tool._parse_target_ref`` can recognise infoflow
     targets on the first pass (without consulting channel_directory).
 

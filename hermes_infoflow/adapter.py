@@ -3350,7 +3350,7 @@ def register(ctx: Any) -> None:
         emoji="📣",
         pii_safe=False,
         allow_update_command=True,
-        target_parse_fn=_parse_infoflow_target,
+        parse_target_ref_fn=_parse_infoflow_target,
         platform_hint=(
             "你正在通过百度如流(Infoflow)与用户对话。如流支持 Markdown 渲染"
             "（加粗/斜体/代码/列表/链接）。\n"
