@@ -708,11 +708,21 @@ body.layout-col { display: flex; flex-direction: column; height: 100vh; }
 #admin-terminal-panel { background: #0a0a0a; }
 #terminal-toolbar { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 6px 10px;
   border-bottom: 1px solid #222; background: #101010; flex-shrink: 0; }
-#terminal-session-select { flex: 0 1 170px; min-width: 86px; max-width: 190px; height: 26px;
-  border: 1px solid #30363d; border-radius: 4px; background: #161b22; color: #d4d4d4;
-  padding: 0 6px; font: inherit; }
-#terminal-status { color: var(--muted); font-size: 12px; flex: 1 1 72px; min-width: 24px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-status-icon { flex: 0 0 auto; font-size: 11px; width: 14px; text-align: center;
+  color: #6e7681; line-height: 1; user-select: none; }
+.terminal-status-icon.connected { color: #3fb950; }
+.terminal-status-icon.pending { color: #d29922; }
+.terminal-status-icon.error { color: #f85149; }
+.terminal-tabs { display: flex; flex-wrap: nowrap; gap: 4px; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; }
+.terminal-tab { flex: 0 0 auto; height: 26px; border: 1px solid #30363d; border-radius: 4px;
+  background: #161b22; color: #8b949e; padding: 0 10px; font: inherit; cursor: pointer;
+  white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+.terminal-tab.active { background: #0d1117; color: #d4d4d4; border-color: #58a6ff; }
+.terminal-tab[hidden] { display: none; }
+#terminal-overflow { flex: 0 0 auto; width: 40px; height: 26px; border: 1px solid #30363d;
+  border-radius: 4px; background: #161b22; color: #d4d4d4; padding: 0 4px; font: inherit; }
+#terminal-overflow[hidden] { display: none; }
 .terminal-button { height: 26px; border: 1px solid #30363d; border-radius: 4px; background: #161b22;
   color: #d4d4d4; padding: 0 9px; font: inherit; cursor: pointer; }
 .terminal-button.icon { width: 28px; padding: 0; font-size: 14px; line-height: 1; }
@@ -761,9 +771,10 @@ _SESSIONTRACKER_HTML = """<!DOCTYPE html>
 </div>
 <div id="admin-terminal-panel" class="panel">
   <div id="terminal-toolbar">
-    <select id="terminal-session-select" aria-label="PTY sessions"></select>
-    <span id="terminal-status">Terminal disabled</span>
-    <button type="button" id="terminal-new" class="terminal-button">New</button>
+    <span id="terminal-status-icon" class="terminal-status-icon" title="Terminal disabled" aria-label="Terminal status" role="img">○</span>
+    <div id="terminal-tabs" class="terminal-tabs" role="tablist" aria-label="PTY sessions"></div>
+    <select id="terminal-overflow" aria-label="More terminals" hidden></select>
+    <button type="button" id="terminal-new" class="terminal-button" title="New terminal">New</button>
     <button type="button" id="terminal-disconnect" class="terminal-button icon" title="Close terminal" aria-label="Close terminal" disabled>⏻</button>
   </div>
   <div id="xterm-host"></div>
@@ -772,6 +783,15 @@ _SESSIONTRACKER_HTML = """<!DOCTYPE html>
 <button type="button" id="scroll-bottom" title="Scroll to bottom">↓</button>
 <script>
 const params = new URLSearchParams(location.search);
+// The active tab and selected terminal are reflected in the URL so a link can
+// be shared to reopen the same view. These UI-only keys must not leak into the
+// API/WS query strings, so read them once and strip them from `params`.
+const initialTab = params.get('tab') || '';
+let desiredTerminalId = params.get('term') || '';
+params.delete('tab');
+params.delete('term');
+let currentTab = 'tracker';
+let initialTabApplied = false;
 const apiBase = location.pathname.replace(/\\/?$/, '') + '/api';
 const staticBase = location.pathname.replace(/\\/?$/, '') + '/static';
 const terminal = document.getElementById('terminal-wrap');
@@ -782,8 +802,9 @@ const trackerPanel = document.getElementById('viewport');
 const terminalPanel = document.getElementById('admin-terminal-panel');
 const tabTracker = document.getElementById('tab-tracker');
 const tabTerminal = document.getElementById('tab-terminal');
-const terminalSessionSelect = document.getElementById('terminal-session-select');
-const terminalStatus = document.getElementById('terminal-status');
+const terminalTabs = document.getElementById('terminal-tabs');
+const terminalOverflow = document.getElementById('terminal-overflow');
+const terminalStatusIcon = document.getElementById('terminal-status-icon');
 const terminalNew = document.getElementById('terminal-new');
 const terminalDisconnect = document.getElementById('terminal-disconnect');
 const xtermHost = document.getElementById('xterm-host');
@@ -990,21 +1011,103 @@ recallCancel.addEventListener('click', () => {
 
 function selectTab(name) {
   const terminalActive = name === 'terminal' && adminTerminalAvailable;
+  currentTab = terminalActive ? 'terminal' : 'tracker';
   trackerPanel.classList.toggle('active', !terminalActive);
   terminalPanel.classList.toggle('active', terminalActive);
   tabTracker.classList.toggle('active', !terminalActive);
   tabTerminal.classList.toggle('active', terminalActive);
   scrollBtn.style.display = terminalActive ? 'none' : '';
   updateRecallDockVisibility();
+  updateLocationState();
   if (terminalActive) {
     openTerminalPanel();
   }
+}
+
+// Reflect the current tab / terminal selection into the address bar (without a
+// reload or a new history entry) so the URL can be copied and shared.
+function updateLocationState() {
+  const q = new URLSearchParams(params);
+  if (currentTab === 'terminal') {
+    q.set('tab', 'terminal');
+    if (activeTerminalId) q.set('term', activeTerminalId);
+  }
+  const qs = q.toString();
+  try { history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '')); } catch (_) {}
+}
+
+function execCopyFallback(text) {
+  const prevActive = document.activeElement;
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.width = '1px';
+    ta.style.height = '1px';
+    ta.style.padding = '0';
+    ta.style.border = 'none';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { ta.setSelectionRange(0, text.length); } catch (_) {}
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  } catch (_) {
+    return false;
+  } finally {
+    // Restore focus to whatever held it (xterm's helper textarea) so typing
+    // and further copies keep working after the transient textarea is gone.
+    if (prevActive && typeof prevActive.focus === 'function') {
+      try { prevActive.focus(); } catch (_) {}
+    }
+  }
+}
+
+// Copy the current terminal selection. This runs from inside the keydown
+// handler, i.e. within a live user gesture. The synchronous execCommand path
+// is attempted FIRST because it is the only mechanism that reliably works in
+// insecure (plain-http) contexts and inside embedded webviews such as the
+// 如流 client. The async Clipboard API is only a best-effort upgrade: if it
+// rejected first, its .catch would fire after the gesture ended, leaving
+// execCommand a no-op and the clipboard empty (the bug this replaces).
+function copyTextToClipboard(text) {
+  if (!text) return false;
+  const ok = execCopyFallback(text);
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { navigator.clipboard.writeText(text).catch(function () {}); } catch (_) {}
+  }
+  return ok;
+}
+
+// Cmd+C (macOS) or Ctrl+Shift+C (Windows/Linux) copies the current selection.
+// Plain Ctrl+C is left untouched so it keeps sending SIGINT to the shell.
+function handleTerminalKey(ev) {
+  if (ev.type !== 'keydown') return true;
+  const key = (ev.key || '').toLowerCase();
+  const copyChord = (ev.metaKey && !ev.ctrlKey && key === 'c') ||
+                    (ev.ctrlKey && ev.shiftKey && key === 'c');
+  if (copyChord) {
+    const sel = (xterm && typeof xterm.getSelection === 'function') ? xterm.getSelection() : '';
+    if (sel) {
+      copyTextToClipboard(sel);
+      ev.preventDefault();
+      return false;
+    }
+  }
+  return true;
 }
 
 tabTracker.addEventListener('click', () => selectTab('tracker'));
 tabTerminal.addEventListener('click', () => selectTab('terminal'));
 
 let terminalWs = null;
+let terminalResizeObserver = null;
 let xterm = null;
 let fitAddon = null;
 let xtermAssetsPromise = null;
@@ -1012,16 +1115,37 @@ let terminalSurfaceReady = false;
 let usingFallback = false;
 let terminalSessions = [];
 let activeTerminalId = '';
-let maxTerminalSessions = 4;
+let maxTerminalSessions = 20;
 let terminalWsId = '';
 let terminalConnectTimer = null;
 let terminalTransport = '';
 let terminalHttpPollToken = 0;
 let terminalHttpPolling = false;
 let terminalOutputCursor = 0;
+let terminalStatusText = 'Terminal disabled';
 
+// The connection status is shown as a compact colored dot; the full text is
+// preserved as the tooltip (and in terminalStatusText for internal checks).
 function setTerminalStatus(text) {
-  terminalStatus.textContent = text;
+  terminalStatusText = text || '';
+  let cls = 'idle';
+  let sym = '\\u25cb';  // ○ idle / ready / disabled
+  if (/^Connected/i.test(terminalStatusText)) {
+    cls = 'connected';
+    sym = '\\u25cf';  // ●
+  } else if (/Connecting|Reconnect|Loading|Closing/i.test(terminalStatusText)) {
+    cls = 'pending';
+    sym = '\\u25cf';
+  } else if (/error|failed/i.test(terminalStatusText)) {
+    cls = 'error';
+    sym = '\\u25cf';
+  } else if (/^Closed/i.test(terminalStatusText)) {
+    cls = 'idle';
+    sym = '\\u25cf';
+  }
+  terminalStatusIcon.className = 'terminal-status-icon ' + cls;
+  terminalStatusIcon.textContent = sym;
+  terminalStatusIcon.title = terminalStatusText;
 }
 
 function clearTerminalConnectTimer() {
@@ -1101,7 +1225,7 @@ async function initAdminTerminal() {
     if (!window.Terminal) throw new Error('xterm unavailable');
     xterm = new window.Terminal({
       cursorBlink: true,
-      convertEol: true,
+      convertEol: false,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
       fontSize: 13,
       scrollback: 8000,
@@ -1118,6 +1242,18 @@ async function initAdminTerminal() {
     }
     xterm.open(xtermHost);
     xterm.onData(data => sendTerminalInput(data));
+    // Keep the PTY winsize locked to the actual on-screen size. Observing the
+    // host element catches layout changes that never fire a window 'resize'
+    // (flex reflow, font metrics settling, embedded webview panels).
+    if (typeof ResizeObserver === 'function' && !terminalResizeObserver) {
+      try {
+        terminalResizeObserver = new ResizeObserver(() => scheduleTerminalResize());
+        terminalResizeObserver.observe(xtermHost);
+      } catch (_) {}
+    }
+    if (typeof xterm.attachCustomKeyEventHandler === 'function') {
+      xterm.attachCustomKeyEventHandler(handleTerminalKey);
+    }
     xterm.writeln('Session Tracker admin terminal');
     terminalFallback.classList.add('hidden');
     xtermHost.classList.remove('hidden');
@@ -1150,7 +1286,22 @@ function terminalDimensions() {
   };
 }
 
+let terminalResizeTimer = null;
+// Coalesce bursts of size changes (font load, panel/window resize, mobile
+// keyboard) into a single fit + backend resize. A stale PTY winsize is the
+// classic cause of wrapped lines being overwritten / drawn at the wrong
+// column, because the shell's line editor wraps at a width the display no
+// longer matches.
+function scheduleTerminalResize() {
+  if (terminalResizeTimer) clearTimeout(terminalResizeTimer);
+  terminalResizeTimer = setTimeout(() => {
+    terminalResizeTimer = null;
+    resizeAdminTerminal();
+  }, 80);
+}
+
 function resizeAdminTerminal() {
+  layoutTerminalTabs();
   if (!terminalSurfaceReady) return;
   if (fitAddon) {
     try { fitAddon.fit(); } catch (_) {}
@@ -1328,31 +1479,75 @@ function abandonTerminalWs(ws) {
 }
 
 function renderTerminalSessionTabs() {
-  terminalSessionSelect.innerHTML = '';
-  if (!terminalSessions.length) {
-    const option = document.createElement('option');
-    option.value = '';
-    option.textContent = 'No terminal';
-    terminalSessionSelect.appendChild(option);
-  }
+  terminalTabs.innerHTML = '';
   terminalSessions.forEach(session => {
-    const option = document.createElement('option');
-    option.value = session.id;
-    option.textContent = session.title || session.id;
-    option.title = session.cwd || session.title || session.id;
-    terminalSessionSelect.appendChild(option);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'terminal-tab' + (session.id === activeTerminalId ? ' active' : '');
+    btn.dataset.terminalId = session.id;
+    btn.textContent = session.title || session.id;
+    btn.title = session.cwd || session.title || session.id;
+    btn.setAttribute('role', 'tab');
+    btn.setAttribute('aria-selected', session.id === activeTerminalId ? 'true' : 'false');
+    btn.disabled = !adminTerminalAvailable;
+    btn.addEventListener('click', () => {
+      if (session.id === activeTerminalId) return;
+      connectAdminTerminal(session.id);
+    });
+    terminalTabs.appendChild(btn);
   });
-  terminalSessionSelect.value = activeTerminalId || '';
-  terminalSessionSelect.disabled = !adminTerminalAvailable || !terminalSessions.length;
   terminalNew.disabled = !adminTerminalAvailable || terminalSessions.length >= maxTerminalSessions;
   terminalDisconnect.disabled = !adminTerminalAvailable || !activeTerminalId;
+  layoutTerminalTabs();
+}
+
+// Show every session as a tab while they fit on one line; once the strip
+// overflows, collapse trailing (non-active) tabs into the compact dropdown.
+function layoutTerminalTabs() {
+  const buttons = Array.prototype.slice.call(terminalTabs.querySelectorAll('.terminal-tab'));
+  buttons.forEach(b => { b.hidden = false; });
+  terminalOverflow.hidden = true;
+  terminalOverflow.innerHTML = '';
+  if (!buttons.length) return;
+  if (!terminalPanel.classList.contains('active') || terminalTabs.clientWidth === 0) return;
+  const fits = () => terminalTabs.scrollWidth <= terminalTabs.clientWidth + 1;
+  if (fits()) return;
+  terminalOverflow.hidden = false;  // reserve its width before measuring again
+  const hiddenIds = [];
+  for (let i = buttons.length - 1; i >= 0 && !fits(); i--) {
+    if (buttons[i].dataset.terminalId === activeTerminalId) continue;
+    buttons[i].hidden = true;
+    hiddenIds.unshift(buttons[i].dataset.terminalId);
+  }
+  if (!hiddenIds.length) { terminalOverflow.hidden = true; return; }
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = '\\u22ef';  // ⋯
+  terminalOverflow.appendChild(placeholder);
+  hiddenIds.forEach(id => {
+    const session = terminalSessions.find(s => s.id === id);
+    if (!session) return;
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = session.title || id;
+    option.title = session.cwd || session.title || id;
+    terminalOverflow.appendChild(option);
+  });
+  terminalOverflow.value = '';
 }
 
 function applyTerminalSessionPayload(data) {
   terminalSessions = data.sessions || terminalSessions || [];
-  maxTerminalSessions = data.max_sessions || maxTerminalSessions || 4;
+  maxTerminalSessions = data.max_sessions || maxTerminalSessions || 20;
   if (data.terminal && data.terminal.id) {
     activeTerminalId = data.terminal.id;
+  }
+  // Honor a terminal requested via the shared URL once, if it still exists.
+  if (desiredTerminalId) {
+    if (terminalSessions.some(item => item.id === desiredTerminalId)) {
+      activeTerminalId = desiredTerminalId;
+    }
+    desiredTerminalId = '';
   }
   if (activeTerminalId && !terminalSessions.some(item => item.id === activeTerminalId)) {
     activeTerminalId = '';
@@ -1361,6 +1556,7 @@ function applyTerminalSessionPayload(data) {
     activeTerminalId = terminalSessions[0].id;
   }
   renderTerminalSessionTabs();
+  updateLocationState();
 }
 
 async function refreshTerminalSessions({ createIfEmpty = false, connect = false } = {}) {
@@ -1424,6 +1620,7 @@ async function connectAdminTerminal(terminalId = activeTerminalId) {
   detachCurrentTerminalWs();
   activeTerminalId = terminalId;
   renderTerminalSessionTabs();
+  updateLocationState();
   resetTerminalSurface();
   terminalOutputCursor = 0;
   if (isMobileTerminalClient()) {
@@ -1509,10 +1706,10 @@ function connectTerminalWs(terminalId, { background = false } = {}) {
     terminalWsId = '';
     if (!terminalHttpPolling) terminalDisconnect.disabled = true;
     if (background && terminalHttpPolling) return;
-    if (terminalStatus.textContent === 'Connected') {
+    if (terminalStatusText === 'Connected') {
       setTerminalStatus('Reconnecting via HTTP...');
       startTerminalHttpFallback(terminalId);
-    } else if (terminalStatus.textContent === 'Connecting...') {
+    } else if (terminalStatusText === 'Connecting...') {
       startTerminalHttpFallback(terminalId);
     }
   };
@@ -1541,14 +1738,13 @@ async function disconnectAdminTerminal() {
 }
 
 terminalNew.addEventListener('click', () => createTerminalSession({ connect: true }));
-terminalSessionSelect.addEventListener('change', () => {
-  const terminalId = terminalSessionSelect.value;
-  if (!terminalId) return;
-  activeTerminalId = terminalId;
+terminalOverflow.addEventListener('change', () => {
+  const terminalId = terminalOverflow.value;
+  if (!terminalId || terminalId === activeTerminalId) return;
   connectAdminTerminal(terminalId);
 });
 terminalDisconnect.addEventListener('click', disconnectAdminTerminal);
-window.addEventListener('resize', resizeAdminTerminal);
+window.addEventListener('resize', scheduleTerminalResize);
 
 const streamBoxes = new Map();
 const thinkingBoxes = new Map();
@@ -1815,8 +2011,14 @@ function updateAdminTerminalAvailability(info) {
     terminalSessions = [];
     activeTerminalId = '';
     renderTerminalSessionTabs();
-  } else if (!terminalWs && terminalStatus.textContent === 'Terminal disabled') {
+  } else if (!terminalWs && terminalStatusText === 'Terminal disabled') {
     setTerminalStatus('Ready');
+  }
+  // Apply the tab requested via the shared URL once the terminal's
+  // availability is known (a non-admin viewer silently stays on Tracker).
+  if (!initialTabApplied && adminTerminalAvailable) {
+    initialTabApplied = true;
+    if (initialTab === 'terminal') selectTab('terminal');
   }
 }
 

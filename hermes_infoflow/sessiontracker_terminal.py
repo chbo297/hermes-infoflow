@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import fcntl
 import json
@@ -26,7 +27,7 @@ LOCALHOST_ADDRS = frozenset({"127.0.0.1", "::1"})
 MAX_TERMINAL_RETENTION_MINUTES = 48 * 60
 MAX_TERMINAL_RETENTION_SECONDS = MAX_TERMINAL_RETENTION_MINUTES * 60
 DEFAULT_TERMINAL_RETENTION_SECONDS = MAX_TERMINAL_RETENTION_SECONDS
-DEFAULT_TERMINAL_MAX_PER_ADMIN = 4
+DEFAULT_TERMINAL_MAX_PER_ADMIN = 20
 DEFAULT_TERMINAL_BUFFER_CHARS = 262144
 
 
@@ -80,7 +81,7 @@ def sessiontracker_terminal_max_per_admin() -> int:
         str(DEFAULT_TERMINAL_MAX_PER_ADMIN),
     ).strip()
     try:
-        return max(1, min(int(raw), 16))
+        return max(1, min(int(raw), 20))
     except ValueError:
         return DEFAULT_TERMINAL_MAX_PER_ADMIN
 
@@ -238,6 +239,13 @@ class TerminalSession:
     output_buffer_chars: int = 0
     output_buffer_start_cursor: int = 0
     output_cursor: int = 0
+    # Streaming UTF-8 decoder: os.read() cuts the PTY stream at arbitrary byte
+    # boundaries, which can split a multi-byte character (CJK, box-drawing,
+    # emoji, powerline glyphs) across two reads. A per-session incremental
+    # decoder holds the incomplete trailing bytes until the rest arrives
+    # instead of emitting U+FFFD and dropping bytes (which corrupts the glyph
+    # and can desync wide-char cursor math).
+    decoder: Any = None
     subscribers: set[Any] = field(default_factory=set)
     reader_task: asyncio.Task[Any] | None = None
     retention_task: asyncio.Task[Any] | None = None
@@ -547,7 +555,12 @@ class TerminalSessionManager:
                 break
             if not data:
                 break
-            text = data.decode("utf-8", errors="replace")
+            if session.decoder is None:
+                session.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+            text = session.decoder.decode(data)
+            if not text:
+                # Only incomplete trailing bytes so far; wait for the remainder.
+                continue
             async with self._lock:
                 if session.closing:
                     break
