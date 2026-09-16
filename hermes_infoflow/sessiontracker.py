@@ -1389,6 +1389,14 @@ async function startTerminalHttpFallback(terminalId) {
   terminalTransport = 'http';
   terminalDisconnect.disabled = false;
   setTerminalStatus('Connected (HTTP)');
+  // A dropped WebSocket usually leaves xterm parked mid escape-sequence or mid
+  // screen-repaint. Resuming the raw PTY stream by *appending* onto that stale
+  // screen is what scrambles the display -- and it desyncs the cell buffer, so
+  // selecting text then copies unrelated cells. Rebuild deterministically
+  // instead: clear the surface and rewind the cursor so the first poll replays
+  // the whole server-side buffer into a clean terminal.
+  resetTerminalSurface();
+  terminalOutputCursor = 0;
   try {
     await terminalApi(
       '/sessions/' + encodeURIComponent(terminalId) + '/resize',
@@ -1623,6 +1631,12 @@ async function connectAdminTerminal(terminalId = activeTerminalId) {
   updateLocationState();
   resetTerminalSurface();
   terminalOutputCursor = 0;
+  // Fit to the current container BEFORE connecting, so the attach handshake
+  // reports the final cols/rows and the replayed buffer is laid out at that
+  // width. Otherwise onopen's fit runs *after* the replay and reflows
+  // (rewraps) the just-drawn scrollback to a new width -- which scrambles
+  // cursor-addressed content and leaves the selection buffer mismatched.
+  resizeAdminTerminal();
   if (isMobileTerminalClient()) {
     startTerminalHttpFallback(terminalId);
     connectTerminalWs(terminalId, { background: true });
