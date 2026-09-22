@@ -100,6 +100,8 @@ _GROUP_STATUS_REDIRECT_PREFIXES = (
     "↻ Thinking-only response",
     "⚠️ Iteration budget exhausted",
     "💾 Self-improvement review:",
+    "ℹ️ Context compression deferred",
+    "ℹ Context compression deferred",
 )
 _GROUP_STATUS_REDIRECT_TEXT_PREFIXES = (
     "No activity",
@@ -137,6 +139,7 @@ _GROUP_STATUS_REDIRECT_TEXT_PREFIXES = (
     "Thinking-only response",
     "Iteration budget exhausted",
     "Response formatting failed",
+    "Context compression deferred",
 )
 _GROUP_STATUS_REDIRECT_ALWAYS_TEXT_PREFIXES = (
     "API call failed",
