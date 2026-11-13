@@ -50,6 +50,18 @@ _PROVIDER_FAILURE_REDIRECT_PREFIXES = (
     "❌ Connection to provider failed after",
 )
 _PROVIDER_FAILURE_NOTICE_TTL_SECONDS = 300.0
+# Kernel runtime warnings that are operational diagnostics, not chat content. They must never
+# reach a real conversation — group OR direct message — and instead go to the ops channel.
+# The kernel deliberately keeps these visible on gateways (not muted), so infoflow re-routes
+# them here rather than swallowing them. See agent/chat_completion_helpers.py (Model fallback),
+# agent/agent_runtime_helpers.py (Primary model restored), agent/conversation_compression.py
+# (context over compression threshold / blocked).
+_RUNTIME_STATUS_OPS_REDIRECT_PREFIXES = (
+    "⚠️ Model fallback:",
+    "✅ Primary model restored:",
+    "⚠ Context is over the compression threshold",
+)
+_RUNTIME_STATUS_NOTICE_TTL_SECONDS = 300.0
 _GROUP_STATUS_REDIRECT_PREFIXES = (
     "⏳ Still working",
     "⚡ Interrupting current task",
@@ -269,6 +281,20 @@ def _provider_failure_redirect_kind(text: str) -> str:
     return ""
 
 
+def _runtime_status_ops_redirect_kind(text: str) -> str:
+    """Classify kernel runtime warnings that must leave chat for ops in ANY chat type.
+
+    Unlike ``_group_status_redirect_kind`` (groups only), this applies to direct messages
+    too: a fallback/overflow notice is an operational diagnostic no end user should receive.
+    """
+    t = (text or "").lstrip()
+    for candidate in (t, _drop_leading_at_mentions(t)):
+        for prefix in _RUNTIME_STATUS_OPS_REDIRECT_PREFIXES:
+            if candidate.startswith(prefix):
+                return prefix
+    return ""
+
+
 def _group_status_redirect_kind(text: str) -> str:
     t = (text or "").lstrip()
     for prefix in _GROUP_STATUS_REDIRECT_PREFIXES:
@@ -377,6 +403,20 @@ def _format_provider_failure_ops_notice(
         f"来源会话：{source_chat_id or '-'}\n"
         f"入站消息：{inbound_mid or '-'}\n"
         f"类型：{failure_kind}\n\n"
+        f"{content}"
+    )
+
+
+def _format_runtime_status_ops_notice(
+    *,
+    source_chat_id: str,
+    content: str,
+    status_kind: str,
+) -> str:
+    return (
+        "Infoflow 运行时告警已拦截（改发运维频道）\n"
+        f"来源会话：{source_chat_id or '-'}\n"
+        f"类型：{status_kind}\n\n"
         f"{content}"
     )
 
@@ -2712,6 +2752,48 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
             )
             return SendResult(success=True)
 
+        runtime_status_kind = _runtime_status_ops_redirect_kind(content)
+        if runtime_status_kind:
+            deduplicated_ops_notice = not self._claim_runtime_status_ops_notice(
+                source_chat_id=chat_id,
+                status_kind=runtime_status_kind,
+            )
+            redirected = False
+            if not deduplicated_ops_notice:
+                redirected = await self._broadcast_runtime_status_to_ops(
+                    source_chat_id=chat_id,
+                    content=content,
+                    status_kind=runtime_status_kind,
+                    session=session,
+                )
+            gw_log().warning(
+                "[iflow:send] mid=%s suppressed runtime status target=%s "
+                "kind=%s redirected_ops=%s deduplicated_ops=%s",
+                inbound_mid,
+                chat_id,
+                runtime_status_kind,
+                redirected,
+                deduplicated_ops_notice,
+            )
+            self._push_infoflow_event(
+                None,
+                kind="outbound.infoflow",
+                chat_id=chat_id,
+                extra={
+                    "type": "text",
+                    "chars": len(content or ""),
+                    "success": True,
+                    "message_id": "",
+                    "error": "",
+                    "suppressed_runtime_status": True,
+                    "runtime_status_kind": runtime_status_kind,
+                    "redirected_to_ops": redirected,
+                    "deduplicated_ops_notice": deduplicated_ops_notice,
+                    "preview": (content or "")[:200],
+                },
+            )
+            return SendResult(success=True)
+
         if self._recall_silence_tracker().consume_if_suppress(
             inbound_mid=inbound_mid,
             chat_id=chat_id,
@@ -2991,6 +3073,56 @@ class InfoflowAdapter(BasePlatformAdapter):  # type: ignore[misc]
         # Claim before the first await so concurrent retry callbacks cannot race.
         self._provider_failure_notice_times[notice_key] = now
         return True
+
+    def _claim_runtime_status_ops_notice(
+        self,
+        *,
+        source_chat_id: str,
+        status_kind: str,
+    ) -> bool:
+        """Claim one ops notice per (chat, kind) within the TTL window.
+
+        Keyed on kind only (not content), so the over-threshold warning — whose token count
+        changes every turn — collapses to one ops line per ~5 min per chat instead of one per turn.
+        """
+        now = asyncio.get_running_loop().time()
+        times = getattr(self, "_runtime_status_notice_times", None)
+        if times is None:
+            times = {}
+            self._runtime_status_notice_times = times
+        cutoff = now - _RUNTIME_STATUS_NOTICE_TTL_SECONDS
+        for key in [k for k, ts in times.items() if ts < cutoff]:
+            times.pop(key, None)
+        notice_key = (str(source_chat_id or ""), str(status_kind or ""))
+        if notice_key in times:
+            return False
+        times[notice_key] = now
+        return True
+
+    async def _broadcast_runtime_status_to_ops(
+        self,
+        *,
+        source_chat_id: str,
+        content: str,
+        status_kind: str,
+        session: aiohttp.ClientSession | None = None,
+    ) -> bool:
+        """Forward a suppressed kernel runtime warning to operations (group or DM source)."""
+        notice = _format_runtime_status_ops_notice(
+            source_chat_id=source_chat_id,
+            content=content,
+            status_kind=status_kind,
+        )
+        return await self._broadcast_ops_notice(
+            notice,
+            session=session,
+            extra={
+                "ops_runtime_status_broadcast": True,
+                "source_chat_id": source_chat_id,
+                "runtime_status_kind": status_kind,
+            },
+            log_context=f"runtime status source={source_chat_id}",
+        )
 
     async def _redirect_group_status_to_admin(
         self,
